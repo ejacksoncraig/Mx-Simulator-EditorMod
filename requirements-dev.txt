@@ -1,0 +1,6 @@
+# The mod's Python helpers (the DLL itself needs only MSVC):
+#   tests/        pytest
+#   tools/port_build.py, read-only disassembly of mx.exe: capstone, pefile
+pytest
+capstone
+pefile
