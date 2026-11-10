@@ -1,15 +1,31 @@
-/* The online tripwire (docs/design.md rule 2): while this DLL is loaded, nothing the game sends reaches
+/* The online tripwire: while this DLL is loaded, nothing the game sends reaches
    anything, this PC included, editor session or not. Armed from DllMain, before the game has sent anything.
 
    It changes no code: mx.exe's import table holds a pointer per Windows function it calls, and the entries for the
    network ones (ws2_32 sendto, WSASendTo, connect, WSAConnect; the game's own network is UDP sendto) are pointed
    here. They're found by value, not by a fixed address, so this works on any game build, also one the editor tools
    don't support. Every call is refused, this PC (127.x, ::1) included, so a server running on the same machine
-   can't be reached either; a box says why and offers to close the game. */
+   can't be reached either; a box says why and offers to close the game.
+
+   Scope: only mx.exe's own import table. Another DLL loaded into the process (the chained opengl32_mxs.dll, an
+   overlay) keeps its own imports and isn't covered. mx.exe sends only through sendto (checked on builds 1681 and
+   1684: no other socket send, no WinINet/WinHTTP, no ws2_32 names looked up at run time). */
 #include "mod.h"
 
 #include <stdio.h>
 #include <string.h>
+
+/* Winsock values, spelled out because winsock2.h can't come after the windows.h that mod.h includes. */
+enum {
+    WS_AF_INET = 2,
+    WS_SOCKET_ERROR = -1,
+    WS_ENETUNREACH = 10051, /* WSAENETUNREACH */
+};
+
+enum {
+    BOX_QUIET_MS = 15000, /* after "No", no new box for this long: the game retries every 2 s */
+    CLOSE_GRACE_MS = 5000, /* after "Yes", how long the game gets to close itself before it's ended */
+};
 
 typedef int(WINAPI *sendto_fn)(UINT_PTR s, const char *buf, int len, int flags, const void *to, int tolen);
 typedef int(WINAPI *wsasendto_fn)(UINT_PTR s, void *bufs, DWORD count, DWORD *sent, DWORD flags, const void *to,
@@ -25,12 +41,13 @@ static connect_fn g_connect;
 static wsaconnect_fn g_wsaconnect;
 static set_error_fn g_set_wsa_error;
 
-enum { MAX_SLOTS = 16 };
+enum { MAX_SLOTS = 64 };
 static void **g_slot[MAX_SLOTS];
 static void *g_slot_real[MAX_SLOTS];
 static int g_slots, g_sendto_slots;
+static int g_missed; /* an entry that should have been swapped wasn't (no room, or the write failed): never armed */
 static volatile LONG g_blocked, g_told;
-static volatile ULONGLONG g_told_until; /* no new box before this tick: the game retries every 2 s */
+static volatile LONG64 g_quiet_until; /* no new box before this GetTickCount64 tick; set and read atomically */
 static char g_note[160] = "not armed yet";
 
 static BOOL CALLBACK find_game_window(HWND w, LPARAM out)
@@ -66,13 +83,13 @@ static DWORD WINAPI say_online_blocked(LPVOID unused)
         mx_log("online tripwire: closing the game, as asked from the box");
         if (game)
             PostMessageA(game, WM_CLOSE, 0, 0);
-        Sleep(5000);
+        Sleep(CLOSE_GRACE_MS);
         mx_log("online tripwire: the game didn't close itself, ending it");
         ExitProcess(0);
     }
     if (game)
         ShowWindowAsync(game, SW_RESTORE);
-    g_told_until = GetTickCount64() + 15000;
+    InterlockedExchange64(&g_quiet_until, (LONG64)(GetTickCount64() + BOX_QUIET_MS));
     InterlockedExchange(&g_told, 0);
     return 0;
 }
@@ -82,13 +99,15 @@ static int blocked(const char *what, const void *to, int tolen)
 {
     LONG n = InterlockedIncrement(&g_blocked);
     if (n <= 3) {
+        /* sockaddr_in: family (little-endian), port (big-endian), then the IPv4 address */
         const unsigned char *a = to;
-        if (a && tolen >= 8 && (a[0] | a[1] << 8) == 2)
+        if (a && tolen >= 8 && (a[0] | a[1] << 8) == WS_AF_INET)
             mx_log("online tripwire: blocked %s to %u.%u.%u.%u:%u", what, a[4], a[5], a[6], a[7], a[2] << 8 | a[3]);
         else
             mx_log("online tripwire: blocked %s", what);
     }
-    if (GetTickCount64() >= g_told_until && !InterlockedExchange(&g_told, 1)) {
+    LONG64 quiet_until = InterlockedCompareExchange64(&g_quiet_until, 0, 0); /* an atomic read */
+    if ((LONG64)GetTickCount64() >= quiet_until && !InterlockedExchange(&g_told, 1)) {
         HANDLE t = CreateThread(NULL, 0, say_online_blocked, NULL, 0, NULL);
         if (t)
             CloseHandle(t);
@@ -96,8 +115,8 @@ static int blocked(const char *what, const void *to, int tolen)
             InterlockedExchange(&g_told, 0);
     }
     if (g_set_wsa_error)
-        g_set_wsa_error(10051); /* WSAENETUNREACH */
-    return -1;                  /* SOCKET_ERROR: the game sees the network as unreachable */
+        g_set_wsa_error(WS_ENETUNREACH);
+    return WS_SOCKET_ERROR; /* the game sees the network as unreachable */
 }
 
 /* All four refuse every call. The real functions are kept only so the import table can be put back on unload. */
@@ -153,11 +172,13 @@ static int swap_imports(uint8_t *base, void *real, void *mine)
     int n = 0;
     for (IMAGE_IMPORT_DESCRIPTOR *d = (IMAGE_IMPORT_DESCRIPTOR *)(base + dir.VirtualAddress); d->Name; d++) {
         for (void **slot = (void **)(base + d->FirstThunk); *slot; slot++) {
-            if (*slot != real || g_slots >= MAX_SLOTS)
+            if (*slot != real)
                 continue;
-            if (write_pointer(slot, mine)) {
+            if (g_slots < MAX_SLOTS && write_pointer(slot, mine)) {
                 g_slot[g_slots] = slot, g_slot_real[g_slots] = real, g_slots++;
                 n++;
+            } else {
+                g_missed = 1; /* fail closed: one live network entry left means not armed */
             }
         }
     }
@@ -185,6 +206,10 @@ int tripwire_arm(int may_load)
     int w = swap_imports(base, (void *)g_wsasendto, (void *)mx_wsasendto);
     int c = swap_imports(base, (void *)g_connect, (void *)mx_connect);
     int a = swap_imports(base, (void *)g_wsaconnect, (void *)mx_wsaconnect);
+    if (g_missed) {
+        snprintf(g_note, sizeof g_note, "not armed: a network import of mx.exe couldn't be swapped");
+        return 0;
+    }
     g_sendto_slots = s + w;
     if (!g_sendto_slots) {
         snprintf(g_note, sizeof g_note, "not armed: mx.exe doesn't import sendto or WSASendTo");

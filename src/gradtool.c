@@ -1,10 +1,11 @@
 /* Tools for the game's own gradients, in our panel while the game's tools are in use (game thread only):
    - Gradient Placement and Edit: Delete (or Del) with Undo Delete, Export to a file, the Saved Gradients list, Place On
      Map (the next click puts its A there, same direction and length) and Put Back Where It Was. Gradient Length
-     (Locked / Extend / Stretch) lives here too, so every row about the picked gradient is in one group.
+     (Locked / Extend / Stretch) lives here too, so every row about the picked gradient is in one group. Berm Preview's
+     button is too; bermpreview.c has the rest of it.
    - Gradient Radial Paint and Add: how far the brush sweeps around A (the game's own is 180 degrees, centred on B,
      running straight past the edges), drawn on the map as a wedge. ingame.c swaps the game's radial helper for one
-     that follows it. The rule is in docs/ingame-tools.md, "Gradient tools".
+     that follows it.
    Saved gradients are one JSON file each in %LOCALAPPDATA%\MX Simulator\mxtools\gradients, newest first. */
 #include "curvetool.h"
 #include "json.h"
@@ -22,7 +23,7 @@
 
 enum {
     GT_HEADER = GRADTOOL_ROW, GT_HINT, GT_LENGTH, GT_DELETE, GT_UNDO_DELETE, GT_EXPORT, GT_SAVED, GT_SAVED_ITEM, GT_PLACE,
-    GT_CANCEL_PLACE, GT_PUT_BACK, GT_FOLDER, GT_SWEEP, GT_SWEEP_SIDE
+    GT_CANCEL_PLACE, GT_PUT_BACK, GT_FOLDER, GT_SWEEP, GT_SWEEP_SIDE, GT_BERM_PREVIEW
 };
 
 static char g_say[192];
@@ -415,6 +416,14 @@ int gradtool_sweep(double *degrees, int *side)
     return !(g_sweep == 180 && g_side == SWEEP_BOTH);
 }
 
+void gradtool_set_sweep(double degrees, int side)
+{
+    if (degrees == degrees) /* not NAN */
+        g_sweep = degrees < 30 ? 30 : degrees > 360 ? 360 : floor(degrees / 15 + 0.5) * 15; /* the slider's steps */
+    if (side >= SWEEP_BOTH && side <= SWEEP_COUNTER)
+        g_side = side;
+}
+
 /* ── the panel ── */
 
 void gradtool_frame(void)
@@ -425,6 +434,7 @@ void gradtool_frame(void)
     /* The folder is read again now and then, so files dropped in from elsewhere show up. */
     if (gradient_mode && (g_frames++ % 120) == 0)
         scan();
+    bermpreview_frame();
 }
 
 int gradtool_rows(panel_row *rows, int max, int *kinds, int *args)
@@ -443,6 +453,8 @@ int gradtool_rows(panel_row *rows, int max, int *kinds, int *args)
                 r->options = LENGTH_OPTIONS, r->count = 3, r->selected = g_gradient_length;
             ROW(GT_DELETE, ROWK_BUTTON, "Delete Gradient (Del)");
             ROW(GT_EXPORT, ROWK_BUTTON, "Export Gradient");
+            if (ROW(GT_BERM_PREVIEW, ROWK_BUTTON, bermpreview_on() ? "Berm Preview: On" : "Berm Preview: Off"))
+                r->on = bermpreview_on();
         } else {
             ROW(GT_HEADER, ROWK_HEADER, "GRADIENTS");
             if (ROW(GT_HINT, ROWK_HINT, ""))
@@ -482,7 +494,7 @@ int gradtool_rows(panel_row *rows, int max, int *kinds, int *args)
         }
         ROW(GT_FOLDER, ROWK_BUTTON, "Open Gradients Folder");
     }
-    if (mode == MODE_RADIAL_PAINT || mode == MODE_RADIAL_ADD) {
+    if (mode == MODE_RADIAL_PAINT || mode == MODE_RADIAL_ADD || bermpreview_on()) {
         ROW(GT_HEADER, ROWK_HEADER, "RADIAL SWEEP");
         if (ROW(GT_SWEEP, ROWK_SLIDER, "Sweep"))
             r->value = g_sweep, r->min = 30, r->max = 360, r->step = 15;
@@ -545,6 +557,7 @@ void gradtool_press(int kind, int arg)
     }
     case GT_FOLDER: open_folder(); break;
     case GT_SWEEP_SIDE: g_side = (g_side + 1) % 3; break;
+    case GT_BERM_PREVIEW: bermpreview_toggle(); break;
     }
 }
 
@@ -607,7 +620,7 @@ void gradtool_scene(scene *out, double mouse_x, double mouse_z)
     }
     int mode = game_editor_mode(), selected = game_selected_gradient();
     static gradient_copy g;
-    if ((mode != MODE_RADIAL_PAINT && mode != MODE_RADIAL_ADD) || selected < 0 || !game_gradient_copy(selected, &g))
+    if ((mode != MODE_RADIAL_PAINT && mode != MODE_RADIAL_ADD && !bermpreview_on()) || selected < 0 || !game_gradient_copy(selected, &g))
         return;
     /* The sweep: from A out to the end of the profile, an arc between its two edges. */
     double radius = g.points ? g.p[g.points - 1].s : 0;

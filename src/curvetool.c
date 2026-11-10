@@ -1,4 +1,4 @@
-/* The curve tool in the game's editor (docs/ingame-tools.md section 8), on the game thread.
+/* The curve tool in the game's editor, on the game thread.
    S1: the panel and the track's curves, read from mx-tools-curves.json and read again when it changes on disk.
    S2: Curve Path worked with the game's mouse and keys, as web/curve-tool.js does it, and saved back to the file. */
 #include "curvetool.h"
@@ -23,14 +23,19 @@ static char g_status[200] = "not started";
 static int g_frames;
 static double g_inner = 10, g_outer = 20; /* the app's defaults (curve-tool.js curveBake); S5 makes them sliders */
 
-enum { DRAG_NONE, DRAG_PULL, DRAG_HANDLE, DRAG_ANCHOR, DRAG_PROFILE };
+enum { DRAG_NONE, DRAG_PULL, DRAG_HANDLE, DRAG_ANCHOR, DRAG_PROFILE, DRAG_GROUP /* a range of profile points as one */,
+       DRAG_MOVE /* a whole curve */ };
 static int g_point = -1;       /* the profile point picked in Curve Profile */
 static int g_pending_type;     /* Segment Type with no point picked (only the widget changes, as in the game) */
 static double g_granularity;   /* the profile graph's snap, 0 = none */
+static double g_trace_fit = 0.05; /* Set From Terrain: how close to the ground, ft */
 static struct {
     int kind, curve, anchor, out_side, moved, changed, closes, resumes, split;
     double from_px, from_py;
 } g_drag;
+/* DRAG_MOVE: where the press was on the map and the curve's points then, so the move is from there, not cumulative. */
+static double g_move_x, g_move_z;
+static pen_anchor g_move_from[CURVE_MAX_ANCHORS];
 
 /* ── the file ── */
 
@@ -170,10 +175,13 @@ static void follow_track(void)
 void curvetool_start(void) { follow_track(); }
 
 static void live_frame(void);
+static void brush_size_frame(void);
 
 void curvetool_frame(void)
 {
+    brush_size_frame();
     live_frame();
+    stamptool_frame(g_mode == CURVE_MODE_STAMP);
     /* About once a second: the track the editor has open, then whether the app rewrote its curves file. Edits here that
        aren't saved win, and say so. */
     if (++g_frames % 60)
@@ -200,6 +208,12 @@ static void set_live(int on);
 
 void curvetool_set_mode(int mode)
 {
+    if (mode == CURVE_MODE_STAMP && !MXMOD_STAMP)
+        return; /* the stamp is shelved */
+    if (g_mode == CURVE_MODE_STAMP && mode != CURVE_MODE_STAMP)
+        stamptool_off(); /* leaving the stamp puts its preview's ground back */
+    if (mode == CURVE_MODE_STAMP)
+        set_live(0);     /* one preview at a time */
     if (mode == CURVE_MODE_OFF) {
         g_drag.kind = DRAG_NONE;
         set_live(0); /* leaving the tool puts the preview's ground back */
@@ -333,28 +347,59 @@ static void profile_flatten(curve *c)
 static void live_cancel(void);
 static void say(const char *text);
 
+/* What Set From Terrain found, in words. */
+static void say_traced(int points, const trace_result *r)
+{
+    static char text[128];
+    snprintf(text, sizeof text, "Profile traced: %d points, %d sharp edge%s, at most %.2f ft from the ground.", points, r->corners,
+             r->corners == 1 ? "" : "s", r->worst_ft);
+    say(text);
+}
+
 /* Set From Terrain: the game's own ground under the path (any preview taken off first, so it reads the real ground). */
 static void profile_terrain(curve *c)
 {
     live_cancel();
     game_map m;
-    if (!game_heights(&m) || !profile_from_ground(c, m.heights, m.width, m.cell_ft)) {
+    trace_result r;
+    if (!game_heights(&m) || !profile_trace_ground(c, m.heights, m.width, m.cell_ft, g_trace_fit, &r)) {
         say("Couldn't read the ground along this curve.");
         return;
     }
     g_point = -1;
     g_dirty = 1;
     status_now();
-    static char text[96];
-    snprintf(text, sizeof text, "Profile traced from the ground along the curve: %d points.", c->points);
-    say(text);
+    say_traced(c->points, &r);
 }
 
-static void mouse_down(const curve_view *v, double px, double py, double x, double z, int ctrl, int alt)
+/* The range of profile points (with the section library, below). */
+static int range_down(const curve_view *v, double x, double z, int shift);
+static void group_move(double x, double z);
+
+static void mouse_down(const curve_view *v, double px, double py, double x, double z, int ctrl, int alt, int shift)
 {
     if (g_mode == CURVE_MODE_PROFILE) {
-        profile_down(v, px, py, x, z);
+        if (!range_down(v, x, z, shift))
+            profile_down(v, px, py, x, z);
         return;
+    }
+    /* Shift+drag on any part of a curve (its line, a point, a handle) moves the whole curve, handles and all. On a curve
+       that isn't selected it's picked first, so one drag does both. Not while drawing: clicks add points then. */
+    if (shift && !g_drawing) {
+        int hit = g_selected >= 0 && g_selected < g_curves.count &&
+                  thing_at(v, &g_curves.c[g_selected], px, py).type != THING_NONE ? g_selected : -1;
+        for (int i = 0; hit < 0 && i < g_curves.count; i++)
+            if (thing_at(v, &g_curves.c[i], px, py).type != THING_NONE)
+                hit = i;
+        if (hit >= 0) {
+            g_selected = hit;
+            g_point = -1;
+            memset(&g_drag, 0, sizeof g_drag);
+            g_drag.kind = DRAG_MOVE, g_drag.curve = hit, g_drag.from_px = px, g_drag.from_py = py;
+            g_move_x = x, g_move_z = z;
+            memcpy(g_move_from, g_curves.c[hit].a, (size_t)g_curves.c[hit].anchors * sizeof g_move_from[0]);
+            return;
+        }
     }
     curve *c = g_selected >= 0 ? &g_curves.c[g_selected] : NULL;
     thing at = c ? thing_at(v, c, px, py) : (thing){THING_NONE, -1, 0, {0, 0, 0}};
@@ -415,6 +460,10 @@ static void mouse_down(const curve_view *v, double px, double py, double x, doub
 
 static void mouse_move(double px, double py, double x, double z, int alt)
 {
+    if (g_drag.kind == DRAG_GROUP) { /* first: on a game gradient, g_drag.curve is the gradient's index */
+        group_move(x, z);
+        return;
+    }
     if (g_drag.kind == DRAG_NONE || g_drag.curve < 0 || g_drag.curve >= g_curves.count)
         return;
     if (g_drag.kind == DRAG_PROFILE) {
@@ -434,6 +483,17 @@ static void mouse_move(double px, double py, double x, double z, int alt)
     if (!g_drag.moved && hypot(px - g_drag.from_px, py - g_drag.from_py) < MIN_DRAG_PX)
         return;
     g_drag.moved = 1;
+    if (g_drag.kind == DRAG_MOVE) {
+        curve *c = &g_curves.c[g_drag.curve];
+        double dx = x - g_move_x, dz = z - g_move_z;
+        for (int k = 0; k < c->anchors; k++) {
+            const pen_anchor *f = &g_move_from[k];
+            pen_anchor *a = &c->a[k];
+            a->x = f->x + dx, a->ix = f->ix + dx, a->ox = f->ox + dx;
+            a->z = f->z + dz, a->iz = f->iz + dz, a->oz = f->oz + dz;
+        }
+        return;
+    }
     pen_anchor *a = &g_curves.c[g_drag.curve].a[g_drag.anchor];
     if (g_drag.kind == DRAG_PULL) {
         pen_pull(a, x, z, alt);
@@ -450,6 +510,10 @@ static void mouse_up(void)
 {
     int kind = g_drag.kind;
     g_drag.kind = DRAG_NONE;
+    if (kind == DRAG_GROUP) {
+        status_now();
+        return;
+    }
     if (kind == DRAG_NONE || g_drag.curve < 0 || g_drag.curve >= g_curves.count)
         return;
     curve *c = &g_curves.c[g_drag.curve];
@@ -468,21 +532,27 @@ static void mouse_up(void)
     }
 }
 
-void curvetool_mouse(const curve_view *v, int type, double px, double py, int ctrl, int alt)
+void curvetool_mouse(const curve_view *v, int type, double px, double py, int ctrl, int alt, int shift)
 {
     double x = (px - v->w / 2) / v->h * v->view_ft + v->cx, z = (py - v->h / 2) / v->h * v->view_ft + v->cz;
-    if (type == CURVE_DOWN)
-        mouse_down(v, px, py, x, z, ctrl, alt);
+    if (g_mode == CURVE_MODE_STAMP)
+        stamptool_mouse(v, type, x, z, ctrl);
+    else if (type == CURVE_DOWN)
+        mouse_down(v, px, py, x, z, ctrl, alt, shift);
     else if (type == CURVE_MOVE)
         mouse_move(px, py, x, z, alt);
     else
         mouse_up();
 }
 
-int curvetool_dragging(void) { return g_drag.kind != DRAG_NONE; }
+int curvetool_dragging(void) { return g_mode == CURVE_MODE_STAMP ? stamptool_dragging() : g_drag.kind != DRAG_NONE; }
 
 int curvetool_key(int key)
 {
+    if (g_mode == CURVE_MODE_STAMP)
+        return stamptool_key(key);
+    if (curvetool_range_key(key)) /* Esc lets go of a range first */
+        return 1;
     if (key == 13 || key == 27) { /* Enter, Esc: finish */
         finish_curve();
         return 1;
@@ -508,7 +578,7 @@ static struct {
     int s_row, s_col, s_rows, s_cols;
     curve last;                /* the curve last previewed, to preview again only when it changes */
     double settings[6];        /* and the bake settings it used */
-    int last_index, frames;
+    int last_index, frames, wait;
 } g_live;
 static double g_strength = 1, g_bank = 0;
 static int g_add = 0, g_limit = CURVE_LIMIT_NONE;
@@ -647,6 +717,29 @@ static void live_cancel(void)
     live_forget();
 }
 
+int curvetool_before_save(void)
+{
+    /* The game reads the ground as it is: the preview comes off, and comes back after a moment (live_forget makes it). */
+    if (!g_live.shown)
+        return 1;
+    game_map m;
+    if (game_heights(&m) && live_untouched(&m)) {
+        size_t cells = (size_t)g_live.rows * g_live.cols;
+        double *ground = malloc(cells * sizeof(double));
+        if (!ground)
+            return 0;
+        for (size_t i = 0; i < cells; i++)
+            ground[i] = g_live.base[i];
+        const char *why = live_write(ground, 0);
+        free(ground);
+        if (why)
+            return 0; /* still on the ground, and still kept, so it can come off later */
+    }
+    live_forget();
+    g_live.wait = 30;
+    return 1;
+}
+
 static void say(const char *text)
 {
     snprintf(g_status, sizeof g_status, "%s", text);
@@ -667,6 +760,10 @@ static void live_frame(void)
 {
     if (!g_live.on)
         return;
+    if (g_live.wait > 0) {
+        g_live.wait--;
+        return;
+    }
     if (g_selected < 0 || g_selected >= g_curves.count || g_curves.c[g_selected].anchors < 2) {
         if (g_live.shown)
             live_cancel();
@@ -710,12 +807,17 @@ enum {
     ROW_INNER, ROW_OUTER, ROW_BANK, ROW_STRENGTH, ROW_BAKE_AS, ROW_SUBMODE, ROW_TURN, ROW_SEGMENT, ROW_GRANULARITY,
     ROW_FROM_TERRAIN, ROW_FLATTEN, ROW_SLOPE, ROW_HEIGHT, ROW_GRADIENT_LENGTH, ROW_SEC_START, ROW_SEC_END, ROW_SEC_SAVE,
     ROW_SEC_CHOICE, ROW_SEC_PASTE, ROW_SEC_DELETE, ROW_SEC_NONE, ROW_SEC_ITEM, ROW_SEC_RENAME, ROW_SEC_KEEP, ROW_SEC_CANCEL,
-    ROW_SEC_TYPED, ROW_BRUSH_SHAPE, ROW_BRUSH_ANGLE, ROW_BRUSH_OVAL, ROW_BRUSH_NOTE, ROW_HEADER, ROW_SEC_CLEAR
+    ROW_SEC_TYPED, ROW_BRUSH_SHAPE, ROW_BRUSH_ANGLE, ROW_BRUSH_OVAL, ROW_BRUSH_TRI_WIDTH, ROW_BRUSH_TRI_LEAN, ROW_BRUSH_NOTE, ROW_HEADER, ROW_SEC_CLEAR,
+    ROW_DUPLICATE, ROW_RNG_CLEAR, ROW_BRUSH_OUTER, ROW_BRUSH_INNER, ROW_PRE_CHOICE, ROW_PRE_ITEM, ROW_PRE_SAVE,
+    ROW_PRE_RENAME, ROW_PRE_DELETE, ROW_PRE_TYPED, ROW_PRE_KEEP, ROW_PRE_CANCEL, ROW_STAMP, ROW_TRACE_FIT, ROW_TRACE_GAME
 };
 static int g_row_arg[64]; /* a list row's section, or a gradtool row's argument */
 static int g_sec_choice;  /* the section chosen in the Section row */
 static int g_sec_list_open;   /* the Section dropdown shows every saved section */
-static int g_typing;          /* Rename Section: the keyboard is ours */
+enum { TYPING_NONE, TYPING_SECTION, TYPING_PRESET }; /* what a typed name is for */
+static int g_typing;          /* Rename Section or Rename Preset: the keyboard is ours */
+static int g_typing_kind;     /* TYPING_PRESET: which list (PRESET_*) */
+static int g_pre_choice[PRESET_KINDS], g_pre_open[PRESET_KINDS]; /* each preset list's chosen one, dropdown open */
 static char g_typed[48];
 static char g_typed_label[64];
 
@@ -725,8 +827,10 @@ static void say(const char *text);
 
 static void keep_typed(void)
 {
-    g_typing = 0;
-    const char *why = library_rename(g_sec_choice, g_typed);
+    int what = g_typing;
+    g_typing = TYPING_NONE;
+    const char *why = what == TYPING_SECTION ? library_rename(g_sec_choice, g_typed)
+                                             : preset_rename(g_typing_kind, g_pre_choice[g_typing_kind], g_typed);
     say(why ? why : "Renamed.");
 }
 
@@ -736,7 +840,7 @@ void curvetool_type(int key)
     if (key == 13 || key == 10)
         keep_typed();
     else if (key == 27)
-        g_typing = 0;
+        g_typing = TYPING_NONE;
     else if (key == 8 && n)
         g_typed[n - 1] = 0;
     else if (key >= 32 && key < 127 && n + 1 < sizeof g_typed)
@@ -745,12 +849,15 @@ void curvetool_type(int key)
 static const char *const SEGMENT_OPTIONS[] = {"Line", "Curve"};
 
 /* Brush shapes for the game's own brush (ingame.c patches its distance while one isn't Circle). */
-static const char *const SHAPE_OPTIONS[] = {"Circle", "Square", "Oval"};
+static const char *const SHAPE_OPTIONS[] = {"Circle", "Square", "Oval", "Triangle"};
 static int g_brush_shape = BRUSH_CIRCLE;
 static double g_brush_angle = 0, g_brush_oval = 0.5;
 int curvetool_brush_shape(void) { return g_brush_shape; }
 double curvetool_brush_angle(void) { return g_brush_angle; }
 double curvetool_brush_oval(void) { return g_brush_oval; }
+static double g_brush_tri_width = 1.1547005383792517, g_brush_tri_lean = 0; /* starts equilateral */
+double curvetool_brush_tri_width(void) { return g_brush_tri_width; }
+double curvetool_brush_tri_lean(void) { return g_brush_tri_lean; }
 
 /* ── the section library on a profile: the game's Gradient Edit (its selected gradient) or our Curve Profile ── */
 
@@ -787,10 +894,139 @@ static void sec_follow(int ctx, int owner)
 }
 
 /* A gradient was deleted or added, so the same index can be another gradient now. */
+static int g_rng_a = -1, g_rng_b = -1; /* a range of profile points: Shift+click its first, then its last */
+
 void curvetool_gradients_changed(void)
 {
     if (g_sec_ctx == SEC_GAME)
         g_sec_start = g_sec_end = -1, g_sec_owner = -1;
+    g_rng_a = g_rng_b = -1;
+}
+
+/* ── a range of profile points, dragged as one: the game's Gradient Edit (its selected gradient) or our Curve Profile ──
+   Shift+click a point to start the range, Shift+click another to end it: every point from one to the other is in it.
+   A plain click on a point in it drags them all (profile_group_drag); a plain click anywhere else lets go of it. The
+   range belongs to one profile with one point count, so any added or deleted point lets go of it too. */
+static int g_rng_ctx, g_rng_owner = -1, g_rng_n;
+static struct {
+    int ctx, owner, n, first, last, held;
+    double ax, az;
+    profile_point from[CURVE_MAX_POINTS]; /* the profile as the drag began */
+} g_group;
+
+static int rng_first(void) { return g_rng_a < g_rng_b ? g_rng_a : g_rng_b; }
+static int rng_last(void) { return g_rng_a > g_rng_b ? g_rng_a : g_rng_b; }
+
+/* The range still fits the profile being edited now (else it's let go of). */
+static int rng_valid(int ctx, int owner, int n)
+{
+    if (ctx != g_rng_ctx || owner != g_rng_owner || n != g_rng_n || rng_last() >= n)
+        g_rng_a = g_rng_b = -1, g_rng_ctx = ctx, g_rng_owner = owner, g_rng_n = n;
+    return g_rng_a >= 0;
+}
+
+/* Where the graph's s = 0, h = 0 is on the map: A, the start of the gradient or curve. */
+static int graph_origin(int ctx, int owner, double *ax, double *az)
+{
+    if (ctx == SEC_CURVE) {
+        *ax = g_curves.c[owner].a[0].x, *az = g_curves.c[owner].a[0].z;
+        return 1;
+    }
+    static gradient_copy g;
+    if (!game_gradient_copy(owner, &g))
+        return 0;
+    *ax = g.ax, *az = g.az;
+    return 1;
+}
+
+static int range_down(const curve_view *v, double x, double z, int shift)
+{
+    static profile_point p[CURVE_MAX_POINTS];
+    int ctx = sec_context(), n, room, picked, owner;
+    double ax, az;
+    if (ctx == SEC_NONE || !sec_profile(ctx, p, &n, &room, &picked, &owner) || !graph_origin(ctx, owner, &ax, &az))
+        return 0;
+    int have = rng_valid(ctx, owner, n);
+    double s = x - ax, h = az - z;
+    double u = v->view_ft * 0.01 > 1 ? v->view_ft * 0.01 : 1;
+    double radius = 0.5 * u > 6 * v->view_ft / v->h ? 0.5 * u : 6 * v->view_ft / v->h; /* as profile_down picks */
+    int at = -1;
+    double best = radius;
+    for (int i = 0; i < n; i++) {
+        double d = hypot(p[i].s - s, p[i].h - h);
+        if (d <= best)
+            at = i, best = d;
+    }
+    if (shift) {
+        if (at < 0)
+            return 0; /* Shift on empty graph: an ordinary click */
+        if (!have)
+            g_rng_a = at;
+        g_rng_b = at;
+        if (ctx == SEC_CURVE)
+            g_point = at;
+        return 1;
+    }
+    if (at >= 0 && have && rng_first() < rng_last() && at >= rng_first() && at <= rng_last()) {
+        g_group.ctx = ctx, g_group.owner = owner, g_group.n = n, g_group.held = at;
+        g_group.first = rng_first(), g_group.last = rng_last(), g_group.ax = ax, g_group.az = az;
+        memcpy(g_group.from, p, (size_t)n * sizeof p[0]);
+        memset(&g_drag, 0, sizeof g_drag);
+        g_drag.kind = DRAG_GROUP, g_drag.curve = owner;
+        if (ctx == SEC_CURVE)
+            g_point = at;
+        return 1;
+    }
+    g_rng_a = g_rng_b = -1; /* a plain click somewhere else lets go of the range, then does what it always does */
+    return 0;
+}
+
+static void group_move(double x, double z)
+{
+    static profile_point out[CURVE_MAX_POINTS];
+    int ctx = sec_context(), owner = ctx == SEC_CURVE ? g_selected : ctx == SEC_GAME ? game_selected_gradient() : -1;
+    if (ctx != g_group.ctx || owner != g_group.owner) { /* the gradient or curve went away mid-drag */
+        g_drag.kind = DRAG_NONE;
+        return;
+    }
+    /* Granularity: ours on a curve, the game's own Granularity slider on a game gradient (0 if it can't be read). */
+    double snap = ctx == SEC_CURVE ? g_granularity : 0, gs, gmin, gmax;
+    if (ctx == SEC_GAME && !game_slider_get(GAME_SLIDER_GRANULARITY, &snap, &gs, &gmin, &gmax))
+        snap = 0;
+    profile_group_drag(g_group.from, g_group.n, g_group.first, g_group.last, g_group.held, x - g_group.ax,
+                       g_group.az - z, snap, out);
+    if (ctx == SEC_CURVE) {
+        curve *c = &g_curves.c[owner];
+        if (c->points != g_group.n) {
+            g_drag.kind = DRAG_NONE;
+            return;
+        }
+        memcpy(c->p, out, (size_t)g_group.n * sizeof out[0]);
+        g_dirty = 1;
+    } else {
+        const char *why = game_set_profile(owner, out, g_group.n, g_group.held);
+        if (why) {
+            say(why);
+            g_drag.kind = DRAG_NONE;
+        }
+    }
+}
+
+int curvetool_graph_down(const curve_view *v, double px, double py, int shift)
+{
+    if (sec_context() != SEC_GAME)
+        return 0;
+    double x = (px - v->w / 2) / v->h * v->view_ft + v->cx, z = (py - v->h / 2) / v->h * v->view_ft + v->cz;
+    return range_down(v, x, z, shift);
+}
+
+int curvetool_range_key(int key)
+{
+    if (key != 27 || g_rng_a < 0 || sec_context() != g_rng_ctx)
+        return 0;
+    g_rng_a = g_rng_b = -1;
+    say("Selection cleared.");
+    return 1;
 }
 
 static void sec_press(int kind)
@@ -902,6 +1138,225 @@ static double tightest_turn(const curve *c)
     return best;
 }
 
+/* ── the game brush's size in feet ──
+   The game's Radius slider is in screen pixels (outer ft = Radius * viewFt / screenH), so its size on the ground
+   changes with zoom; inner = Focus * outer. Our Outer and Inner sliders (and a brush preset) set a size in feet and
+   hold it: each frame the game's Radius and Focus are set to give those feet at the current zoom. Moving the game's
+   own Radius or Focus lets go of the hold. The Radius slider tops out at 128 px, but the hold writes past it (see
+   brush_size_frame), so the size holds at any zoom; g_brush_capped only if it's bigger than the game's own brush
+   gets at its lowest zoom. */
+static int g_hold, g_hold_written, g_brush_capped;
+static double g_hold_outer = 25, g_hold_inner = 12.5, g_last_radius, g_last_focus;
+
+/* The game brush's size in feet now: what's held, else what the game's sliders give at this zoom. */
+static int brush_feet(double *outer, double *inner)
+{
+    double r, rs, rmin, rmax, f, fs, fmin, fmax, view;
+    int h;
+    if (!game_slider_get(GAME_SLIDER_RADIUS, &r, &rs, &rmin, &rmax) || !game_slider_get(GAME_SLIDER_FOCUS, &f, &fs, &fmin, &fmax))
+        return 0;
+    if (g_hold) {
+        *outer = g_hold_outer, *inner = g_hold_inner;
+        return 1;
+    }
+    if (!ingame_view(&view, &h) || h <= 0)
+        return 0;
+    *outer = r * view / h, *inner = f * *outer;
+    return 1;
+}
+int curvetool_brush_feet(double *outer, double *inner) { return brush_feet(outer, inner); }
+
+static void hold_brush(double outer, double inner)
+{
+    g_hold_outer = outer < 0.5 ? 0.5 : outer;
+    g_hold_inner = inner < 0 ? 0 : inner > g_hold_outer ? g_hold_outer : inner;
+    g_hold = 1, g_hold_written = 0;
+}
+
+static void brush_size_frame(void)
+{
+    if (!g_hold)
+        return;
+    double r, rs, rmin, rmax, f, fs, fmin, fmax, view;
+    int h;
+    if (!game_slider_get(GAME_SLIDER_RADIUS, &r, &rs, &rmin, &rmax) || !game_slider_get(GAME_SLIDER_FOCUS, &f, &fs, &fmin, &fmax) ||
+        !ingame_view(&view, &h) || h <= 0 || !(view > 0))
+        return;
+    /* The game's own slider moved (more than its step's rounding): the player took the brush back. */
+    if (g_hold_written && (fabs(r - g_last_radius) > rs / 2 + 1e-9 || fabs(f - g_last_focus) > fs / 2 + 1e-9)) {
+        g_hold = 0;
+        say("Brush size let go: the game's Radius or Focus was moved.");
+        return;
+    }
+    double want = g_hold_outer * h / view;
+    /* Radius's own 1..128 px would stop the hold a couple of zoom steps in (a 50 ft brush needs ~150 px at zoom 2.5).
+       The brush code reads Radius unclamped (outer ft = Radius * mapFt / (screenH * 2^zoom), mx.exe 1684 0x1400ed97b),
+       so it's written past 128, kept to the feet the game's own 1..128 px reach somewhere in the Zoom slider's range:
+       128 px at the lowest zoom is the biggest brush the game makes itself, 1 px at the highest the smallest. */
+    double z, zs, zmin, zmax, lo = rmin, hi = rmax;
+    if (game_slider_get(GAME_SLIDER_ZOOM, &z, &zs, &zmin, &zmax) && zmax >= zmin && z >= zmin && z <= zmax)
+        lo = rmin * pow(2.0, z - zmax), hi = rmax * pow(2.0, z - zmin);
+    g_brush_capped = want > hi;
+    game_slider_set_unclamped(GAME_SLIDER_RADIUS, want, lo, hi);
+    game_slider_set(GAME_SLIDER_FOCUS, g_hold_outer > 0 ? g_hold_inner / g_hold_outer : 0);
+    game_slider_get(GAME_SLIDER_RADIUS, &g_last_radius, &rs, &rmin, &rmax);
+    game_slider_get(GAME_SLIDER_FOCUS, &g_last_focus, &fs, &fmin, &fmax);
+    g_hold_written = 1;
+}
+
+/* ── presets: the current settings saved under a name, and put back ── */
+
+static double clampd(double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+static void preset_current(int kind, double *v)
+{
+    for (int i = 0; i < PRESET_FIELDS; i++)
+        v[i] = NAN;
+    if (kind == PRESET_CURVE) {
+        v[PC_INNER] = g_inner, v[PC_OUTER] = g_outer, v[PC_BANK] = g_bank, v[PC_STRENGTH] = g_strength;
+        v[PC_ADD] = g_add, v[PC_LIMIT] = g_limit;
+        return;
+    }
+    double outer, inner, sweep;
+    int side;
+    if (brush_feet(&outer, &inner))
+        v[PB_OUTER] = floor(outer * 100 + 0.5) / 100, v[PB_INNER] = floor(inner * 100 + 0.5) / 100;
+    v[PB_SHAPE] = g_brush_shape, v[PB_ANGLE] = g_brush_angle, v[PB_OVAL] = g_brush_oval;
+    v[PB_TRI_WIDTH] = g_brush_tri_width, v[PB_TRI_LEAN] = g_brush_tri_lean;
+    gradtool_sweep(&sweep, &side);
+    v[PB_SWEEP] = sweep, v[PB_SIDE] = side;
+}
+
+static void preset_use(int kind, int i)
+{
+    const preset *p = preset_get(kind, i);
+    if (!p)
+        return;
+    const double *v = p->v;
+#define HAVE(k) (v[k] == v[k]) /* not NAN */
+    if (kind == PRESET_CURVE) {
+        if (HAVE(PC_OUTER)) g_outer = clampd(v[PC_OUTER], 0.5, 100);
+        if (HAVE(PC_INNER)) g_inner = clampd(v[PC_INNER], 0, 50);
+        if (g_inner > g_outer) g_inner = g_outer;
+        if (HAVE(PC_BANK)) g_bank = clampd(v[PC_BANK], -1, 1);
+        if (HAVE(PC_STRENGTH)) g_strength = clampd(v[PC_STRENGTH], 0, 1);
+        if (HAVE(PC_ADD)) g_add = v[PC_ADD] != 0;
+        if (HAVE(PC_LIMIT)) g_limit = (int)clampd(v[PC_LIMIT], 0, 2);
+    } else {
+        if (HAVE(PB_SHAPE)) g_brush_shape = (int)clampd(v[PB_SHAPE], 0, BRUSH_TRIANGLE);
+        if (HAVE(PB_ANGLE)) g_brush_angle = clampd(v[PB_ANGLE], 0, 360);
+        if (HAVE(PB_OVAL)) g_brush_oval = clampd(v[PB_OVAL], 0.1, 1);
+        if (HAVE(PB_TRI_WIDTH)) g_brush_tri_width = clampd(v[PB_TRI_WIDTH], 0.25, 2.5);
+        if (HAVE(PB_TRI_LEAN)) g_brush_tri_lean = clampd(v[PB_TRI_LEAN], -1, 1);
+        gradtool_set_sweep(HAVE(PB_SWEEP) ? v[PB_SWEEP] : NAN, HAVE(PB_SIDE) ? (int)clampd(v[PB_SIDE], 0, 2) : -1);
+        if (HAVE(PB_OUTER) && HAVE(PB_INNER))
+            hold_brush(v[PB_OUTER], v[PB_INNER]);
+    }
+#undef HAVE
+    static char done[96];
+    snprintf(done, sizeof done, "Using preset: %s.", p->name);
+    say(done);
+}
+
+/* A preset list's rows: the chosen one as a dropdown (a click on an item uses it), Save, Rename and Delete. */
+static int preset_rows(int kind, panel_row *rows, int n, int max)
+{
+    panel_row *r = NULL;
+#define PROW(kind_, rowk, label_)                                                                                 \
+    (n < max && n < MAX_PANEL_ROWS ? (memset(r = &rows[n], 0, sizeof *r), g_row_kind[n] = (kind_), g_row_arg[n] = kind, \
+                                      r->kind = (rowk), r->label = (label_), n++, 1)                                 \
+                                   : (r = NULL, 0))
+    PROW(ROW_HEADER, ROWK_HEADER, kind == PRESET_CURVE ? "CURVE PRESETS" : "BRUSH PRESETS");
+    int count = preset_count(kind);
+    if (count) {
+        g_pre_choice[kind] = g_pre_choice[kind] < count ? g_pre_choice[kind] : 0;
+        const char *const *names = preset_names(kind);
+        static char choice_label[PRESET_KINDS][96], item_label[PRESET_KINDS][PRESET_MAX][64];
+        snprintf(choice_label[kind], sizeof choice_label[kind], "%s  %s", names[g_pre_choice[kind]], g_pre_open[kind] ? "^" : "v");
+        if (PROW(ROW_PRE_CHOICE, ROWK_BUTTON, choice_label[kind]))
+            r->on = g_pre_open[kind];
+        if (g_pre_open[kind]) {
+            for (int i = 0; i < count; i++) {
+                snprintf(item_label[kind][i], sizeof item_label[kind][i], "%s %s", i == g_pre_choice[kind] ? ">" : "  ", names[i]);
+                if (PROW(ROW_PRE_ITEM, ROWK_BUTTON, item_label[kind][i])) {
+                    r->on = i == g_pre_choice[kind];
+                    g_row_arg[n - 1] = kind * 1000 + i;
+                }
+            }
+            if (PROW(ROW_HEADER, ROWK_HINT, ""))
+                snprintf(r->text, sizeof r->text, "Click one to use it");
+        } else if (PROW(ROW_HEADER, ROWK_HINT, "")) {
+            snprintf(r->text, sizeof r->text, "Click the name to pick and use one");
+        }
+    } else if (PROW(ROW_HEADER, ROWK_HINT, "")) {
+        snprintf(r->text, sizeof r->text, "Save these settings to reuse them");
+    }
+    PROW(ROW_PRE_SAVE, ROWK_BUTTON, "Save As New Preset");
+    if (count) {
+        if (g_typing == TYPING_PRESET && g_typing_kind == kind) {
+            snprintf(g_typed_label, sizeof g_typed_label, "Name: %s_", g_typed);
+            PROW(ROW_PRE_TYPED, ROWK_BUTTON, g_typed_label);
+            PROW(ROW_PRE_KEEP, ROWK_BUTTON, "Keep Name (Enter)");
+            PROW(ROW_PRE_CANCEL, ROWK_BUTTON, "Cancel (Esc)");
+        } else {
+            PROW(ROW_PRE_RENAME, ROWK_BUTTON, "Rename Preset");
+        }
+        PROW(ROW_PRE_DELETE, ROWK_BUTTON, "Delete Preset");
+    }
+#undef PROW
+    return n;
+}
+
+static void preset_press(int kind_row, int arg)
+{
+    int kind = kind_row == ROW_PRE_ITEM ? arg / 1000 : arg;
+    if (kind < 0 || kind >= PRESET_KINDS)
+        return;
+    const char *why = NULL;
+    switch (kind_row) {
+    case ROW_PRE_CHOICE: g_pre_open[kind] = !g_pre_open[kind]; break;
+    case ROW_PRE_ITEM:
+        g_pre_choice[kind] = arg % 1000;
+        g_pre_open[kind] = 0;
+        preset_use(kind, g_pre_choice[kind]);
+        break;
+    case ROW_PRE_SAVE: {
+        double v[PRESET_FIELDS];
+        preset_current(kind, v);
+        if (kind == PRESET_BRUSH && v[PB_OUTER] != v[PB_OUTER]) {
+            why = "This game version's brush size isn't known to the mod.";
+            break;
+        }
+        why = preset_add(kind, v);
+        if (!why) {
+            g_pre_choice[kind] = preset_count(kind) - 1;
+            say("Preset saved. Rename Preset gives it your own name.");
+        }
+        break;
+    }
+    case ROW_PRE_RENAME:
+        if (!preset_get(kind, g_pre_choice[kind]))
+            break;
+        snprintf(g_typed, sizeof g_typed, "%s", preset_get(kind, g_pre_choice[kind])->name);
+        g_typing = TYPING_PRESET, g_typing_kind = kind;
+        g_pre_open[kind] = 0;
+        say("Type a name: Enter keeps it, Esc cancels.");
+        break;
+    case ROW_PRE_KEEP: keep_typed(); break;
+    case ROW_PRE_CANCEL: g_typing = TYPING_NONE; break;
+    case ROW_PRE_DELETE:
+        why = preset_delete(kind, g_pre_choice[kind]);
+        if (!why) {
+            int count = preset_count(kind);
+            g_pre_choice[kind] = g_pre_choice[kind] >= count ? (count ? count - 1 : 0) : g_pre_choice[kind];
+            say("Preset deleted.");
+        }
+        break;
+    }
+    if (why)
+        say(why);
+}
+
 int curvetool_panel(panel_row *rows, int max)
 {
     int n = 0;
@@ -916,16 +1371,43 @@ int curvetool_panel(panel_row *rows, int max)
         r->on = g_mode == CURVE_MODE_PATH;
     if (ROW(ROW_PROFILE, ROWK_BUTTON, "Curve Profile"))
         r->on = g_mode == CURVE_MODE_PROFILE;
+#if MXMOD_STAMP
+    if (ROW(ROW_STAMP, ROWK_BUTTON, "Rut Stamp"))
+        r->on = g_mode == CURVE_MODE_STAMP;
+#endif
+    if (g_mode == CURVE_MODE_STAMP) {
+        int room = (max < MAX_PANEL_ROWS ? max : MAX_PANEL_ROWS) - n;
+        if (room > 0)
+            n += stamptool_rows(rows + n, room, g_row_kind + n, g_row_arg + n);
+    }
     /* For the game's own brush modes (0 Raise .. 8 Gradient Radial Add): the brush's shape. */
     int game_mode = game_editor_mode();
     if (g_mode == CURVE_MODE_OFF && game_mode >= 0 && game_mode <= 8) {
-        ROW(ROW_HEADER, ROWK_HEADER, "BRUSH SHAPE");
+        ROW(ROW_HEADER, ROWK_HEADER, "BRUSH");
+        double outer_ft, inner_ft;
+        if (brush_feet(&outer_ft, &inner_ft)) {
+            /* The size in feet, held across zoom (brush_size_frame); the game's own Radius and Focus still work. */
+            if (ROW(ROW_BRUSH_OUTER, ROWK_SLIDER, "Outer (ft)"))
+                r->value = outer_ft, r->min = 0.5, r->max = 100, r->step = 0.5;
+            if (ROW(ROW_BRUSH_INNER, ROWK_SLIDER, "Inner (ft)"))
+                r->value = inner_ft, r->min = 0, r->max = 50, r->step = 0.5;
+            if (g_hold && g_brush_capped && ROW(ROW_HEADER, ROWK_HINT, ""))
+                snprintf(r->text, sizeof r->text, "Zoom out to reach the full size");
+        }
         if (ROW(ROW_BRUSH_SHAPE, ROWK_CHOICE, "Brush Shape"))
-            r->options = SHAPE_OPTIONS, r->count = 3, r->selected = g_brush_shape;
+            r->options = SHAPE_OPTIONS, r->count = BRUSH_TRIANGLE + 1, r->selected = g_brush_shape;
         if (g_brush_shape != BRUSH_CIRCLE && ROW(ROW_BRUSH_ANGLE, ROWK_SLIDER, "Brush Angle"))
-            r->value = g_brush_angle, r->min = 0, r->max = 180, r->step = 5;
+            r->value = g_brush_angle, r->min = 0, r->max = 360, r->step = 5; /* a lopsided triangle needs the full turn */
         if (g_brush_shape == BRUSH_OVAL && ROW(ROW_BRUSH_OVAL, ROWK_SLIDER, "Oval Width"))
             r->value = g_brush_oval, r->min = 0.1, r->max = 1, r->step = 0.05;
+        if (g_brush_shape == BRUSH_TRIANGLE) {
+            if (ROW(ROW_BRUSH_TRI_WIDTH, ROWK_SLIDER, "Triangle Width"))
+                r->value = g_brush_tri_width, r->min = 0.25, r->max = 2.5, r->step = 0.05;
+            if (ROW(ROW_BRUSH_TRI_LEAN, ROWK_SLIDER, "Triangle Lean"))
+                r->value = g_brush_tri_lean, r->min = -1, r->max = 1, r->step = 0.05;
+            if (ROW(ROW_HEADER, ROWK_HINT, ""))
+                snprintf(r->text, sizeof r->text, "Lean 1 or -1: right angle");
+        }
         if (g_brush_shape != BRUSH_CIRCLE && game_mode == 2 && ROW(ROW_BRUSH_NOTE, ROWK_LABEL, ""))
             snprintf(r->text, sizeof r->text, "Smooth stays round");
     }
@@ -934,21 +1416,28 @@ int curvetool_panel(panel_row *rows, int max)
         int room = (max < MAX_PANEL_ROWS ? max : MAX_PANEL_ROWS) - n;
         if (room > 0)
             n += gradtool_rows(rows + n, room, g_row_kind + n, g_row_arg + n);
+        room = (max < MAX_PANEL_ROWS ? max : MAX_PANEL_ROWS) - n;
+        if (room > 0)
+            n += decaltool_rows(rows + n, room, g_row_kind + n, g_row_arg + n); /* Decals mode (15) only */
+        if (game_mode >= 0 && game_mode <= 8)
+            n = preset_rows(PRESET_BRUSH, rows, n, max); /* size, shape and sweep, after the sweep's own rows */
     }
     if (g_mode == CURVE_MODE_PATH)
         ROW(g_drawing ? ROW_FINISH : ROW_NEW, ROWK_BUTTON, g_drawing ? "Finish Curve (Enter)" : "New Curve");
     const curve *c = g_selected >= 0 && g_selected < g_curves.count ? &g_curves.c[g_selected] : NULL;
-    if (g_mode != CURVE_MODE_OFF && c) {
+    if ((g_mode == CURVE_MODE_PATH || g_mode == CURVE_MODE_PROFILE) && c) {
         if (ROW(ROW_LENGTH, ROWK_LABEL, ""))
             snprintf(r->text, sizeof r->text, "Length: %.2f", pen_length(c));
         if (g_mode == CURVE_MODE_PROFILE) {
-            /* The game's Gradient Edit rows (docs/game/editor-gradients-ui.md section 10). */
+            /* The game's Gradient Edit rows. */
             const profile_point *point = g_point >= 0 && g_point < c->points ? &c->p[g_point] : NULL;
             if (ROW(ROW_SEGMENT, ROWK_CHOICE, "Segment Type"))
                 r->options = SEGMENT_OPTIONS, r->count = 2, r->selected = point ? point->type == 1 : g_pending_type;
             if (ROW(ROW_GRANULARITY, ROWK_SLIDER, "Granularity"))
                 r->value = g_granularity, r->min = 0, r->max = 1, r->step = 1.0 / 16;
             ROW(ROW_FROM_TERRAIN, ROWK_BUTTON, "Set From Terrain");
+            if (ROW(ROW_TRACE_FIT, ROWK_SLIDER, "Terrain Fit (ft)"))
+                r->value = g_trace_fit, r->min = 0.01, r->max = 0.25, r->step = 0.01;
             ROW(ROW_FLATTEN, ROWK_BUTTON, "Flatten");
             if (point) {
                 if (ROW(ROW_SLOPE, ROWK_LABEL, ""))
@@ -960,9 +1449,9 @@ int curvetool_panel(panel_row *rows, int max)
         if (g_mode == CURVE_MODE_PATH && ROW(ROW_RESIZE, ROWK_CHOICE, "Path Change"))
             r->options = RESIZE_OPTIONS, r->count = 2, r->selected = g_stretch;
         if (ROW(ROW_INNER, ROWK_SLIDER, "Inner"))
-            r->value = g_inner, r->min = 0, r->max = 100, r->step = 0.5;
+            r->value = g_inner, r->min = 0, r->max = 50, r->step = 0.5;
         if (ROW(ROW_OUTER, ROWK_SLIDER, "Outer"))
-            r->value = g_outer, r->min = 0.5, r->max = 150, r->step = 0.5;
+            r->value = g_outer, r->min = 0.5, r->max = 100, r->step = 0.5;
         if (ROW(ROW_BANK, ROWK_SLIDER, "Bank"))
             r->value = g_bank, r->min = -1, r->max = 1, r->step = 0.01;
         if (ROW(ROW_STRENGTH, ROWK_SLIDER, "Strength"))
@@ -971,11 +1460,16 @@ int curvetool_panel(panel_row *rows, int max)
             r->options = BAKE_OPTIONS, r->count = 2, r->selected = g_add;
         if (ROW(ROW_SUBMODE, ROWK_CHOICE, "SubMode"))
             r->options = SUBMODE_OPTIONS, r->count = 3, r->selected = g_limit;
+        n = preset_rows(PRESET_CURVE, rows, n, max); /* Inner, Outer, Bank, Strength, Bake As, SubMode */
         if (ROW(ROW_LIVE, ROWK_BUTTON, g_live.on ? "Live Preview: On" : "Live Preview: Off"))
             r->on = g_live.on;
         ROW(ROW_APPLY, ROWK_BUTTON, "Apply To Ground");
-        if (g_mode == CURVE_MODE_PATH)
+        if (g_mode == CURVE_MODE_PATH) {
+            if (ROW(ROW_HEADER, ROWK_HINT, ""))
+                snprintf(r->text, sizeof r->text, "Shift+drag a curve to move all of it");
+            ROW(ROW_DUPLICATE, ROWK_BUTTON, "Duplicate Curve");
             ROW(ROW_DELETE, ROWK_BUTTON, "Delete Curve");
+        }
         if (ROW(ROW_TURN, ROWK_LABEL, "")) {
             double turn = tightest_turn(c);
             if (turn < 0)
@@ -989,8 +1483,10 @@ int curvetool_panel(panel_row *rows, int max)
     /* The section library, on the profile being edited (the game's Gradient Edit, or our Curve Profile). Typing a name
        only lasts while its row is there, so the keyboard always comes back. */
     int ctx = sec_context();
+    if ((ctx == SEC_NONE || !library_count()) && g_typing == TYPING_SECTION)
+        g_typing = TYPING_NONE;
     if (ctx == SEC_NONE || !library_count())
-        g_typing = 0, g_sec_list_open = 0;
+        g_sec_list_open = 0;
     if (ctx != SEC_NONE) {
         static profile_point p[CURVE_MAX_POINTS];
         int count, room, picked, owner;
@@ -998,6 +1494,27 @@ int curvetool_panel(panel_row *rows, int max)
             sec_follow(ctx, owner);
             if (g_sec_start >= count || g_sec_end >= count)
                 g_sec_start = g_sec_end = -1; /* the profile lost points since */
+            /* The game's own Set From Terrain button rounds off sharp edges; this one keeps them. */
+            if (ctx == SEC_GAME) {
+                ROW(ROW_HEADER, ROWK_HEADER, "TRACE THE GROUND");
+                ROW(ROW_TRACE_GAME, ROWK_BUTTON, "Set From Terrain (Sharp)");
+                if (ROW(ROW_TRACE_FIT, ROWK_SLIDER, "Terrain Fit (ft)"))
+                    r->value = g_trace_fit, r->min = 0.01, r->max = 0.25, r->step = 0.01;
+            }
+            /* Moving several points at once: the range is drawn on the graph (range_scene). */
+            ROW(ROW_HEADER, ROWK_HEADER, "MOVE SEVERAL POINTS");
+            if (!rng_valid(ctx, owner, count)) {
+                if (ROW(ROW_HEADER, ROWK_HINT, ""))
+                    snprintf(r->text, sizeof r->text, "Shift+click first point, then last");
+            } else if (rng_first() == rng_last()) {
+                if (ROW(ROW_HEADER, ROWK_HINT, ""))
+                    snprintf(r->text, sizeof r->text, "Now Shift+click the last point");
+            } else {
+                if (ROW(ROW_HEADER, ROWK_HINT, ""))
+                    snprintf(r->text, sizeof r->text, "Points %d-%d: drag one to move all", rng_first() + 1, rng_last() + 1);
+            }
+            if (g_rng_a >= 0)
+                ROW(ROW_RNG_CLEAR, ROWK_BUTTON, "Clear Selection (Esc)");
             /* Saving: three steps, each spelled out in a hint, with the marks drawn on the graph (sec_scene). */
             ROW(ROW_HEADER, ROWK_HEADER, "SAVE A PROFILE SECTION");
             if (g_sec_start < 0 && ROW(ROW_HEADER, ROWK_HINT, ""))
@@ -1051,7 +1568,7 @@ int curvetool_panel(panel_row *rows, int max)
                         snprintf(r->text, sizeof r->text, "Click the point to paste it at");
                 }
                 ROW(ROW_SEC_PASTE, ROWK_BUTTON, "Paste At Picked Point");
-                if (g_typing) {
+                if (g_typing == TYPING_SECTION) {
                     snprintf(g_typed_label, sizeof g_typed_label, "Name: %s_", g_typed);
                     ROW(ROW_SEC_TYPED, ROWK_BUTTON, g_typed_label);
                     ROW(ROW_SEC_KEEP, ROWK_BUTTON, "Keep Name (Enter)");
@@ -1065,7 +1582,7 @@ int curvetool_panel(panel_row *rows, int max)
             }
         }
     }
-    if (g_mode != CURVE_MODE_OFF || g_dirty)
+    if (g_mode == CURVE_MODE_PATH || g_mode == CURVE_MODE_PROFILE || g_dirty)
         ROW(ROW_SAVE, ROWK_BUTTON, g_dirty ? "Save Curves*" : "Save Curves");
 #undef ROW
     return n;
@@ -1075,6 +1592,12 @@ void curvetool_slide(int row, double value)
 {
     if (row < 0 || row >= MAX_PANEL_ROWS)
         return;
+    if (g_row_kind[row] >= DECALTOOL_ROW)
+        return; /* the decal rows have no sliders */
+    if (g_row_kind[row] >= STAMPTOOL_ROW) {
+        stamptool_slide(g_row_kind[row], value);
+        return;
+    }
     if (g_row_kind[row] >= GRADTOOL_ROW) {
         gradtool_slide(g_row_kind[row], value);
         return;
@@ -1093,21 +1616,105 @@ void curvetool_slide(int row, double value)
     case ROW_BANK: g_bank = value; break;
     case ROW_STRENGTH: g_strength = value; break;
     case ROW_GRANULARITY: g_granularity = value; break;
+    case ROW_TRACE_FIT: g_trace_fit = value; break;
     case ROW_BRUSH_ANGLE: g_brush_angle = value; break;
-    case ROW_BRUSH_OVAL: g_brush_oval = value; break;
+    case ROW_BRUSH_OUTER:
+    case ROW_BRUSH_INNER: {
+        double outer, inner;
+        if (!brush_feet(&outer, &inner))
+            break;
+        if (g_row_kind[row] == ROW_BRUSH_OUTER)
+            hold_brush(value, inner > value ? value : inner);
+        else
+            hold_brush(value > outer ? value : outer, value); /* inner can't pass outer: outer grows with it */
+        break;
     }
+    case ROW_BRUSH_OVAL: g_brush_oval = value; break;
+    case ROW_BRUSH_TRI_WIDTH: g_brush_tri_width = value; break;
+    case ROW_BRUSH_TRI_LEAN: g_brush_tri_lean = value; break;
+    }
+}
+
+/* Duplicate Curve: a copy 10 ft to the side, as the game's Copy Gradient offsets its copy (10 * (dz, -dx) / |AB|, with
+   AB the curve's first segment here). The copy is the one selected, ready to drag into place. */
+static void duplicate_curve(int i)
+{
+    if (i < 0 || i >= g_curves.count)
+        return;
+    if (g_curves.count >= CURVE_MAX) {
+        say("There's no room for another curve (64 at most).");
+        return;
+    }
+    set_live(0);
+    curve *src = &g_curves.c[i], *dst = &g_curves.c[g_curves.count];
+    *dst = *src;
+    double dx = src->anchors > 1 ? src->a[1].x - src->a[0].x : 1, dz = src->anchors > 1 ? src->a[1].z - src->a[0].z : 0;
+    double len = hypot(dx, dz);
+    double ox = len > 1e-9 ? 10 * dz / len : 10, oz = len > 1e-9 ? -10 * dx / len : 0;
+    for (int k = 0; k < dst->anchors; k++) {
+        pen_anchor *a = &dst->a[k];
+        a->x += ox, a->ix += ox, a->ox += ox;
+        a->z += oz, a->iz += oz, a->oz += oz;
+    }
+    g_selected = g_curves.count++;
+    g_drawing = 0;
+    g_point = -1;
+    g_dirty = 1;
+    status_now();
+    say("Duplicated: the copy is 10 ft to the side and selected.");
+}
+
+/* Set From Terrain (Sharp) on the game's selected gradient: the same trace, along its straight line from A to B. */
+static void game_gradient_terrain(void)
+{
+    static gradient_copy g;
+    static curve line;
+    int owner = game_selected_gradient();
+    if (owner < 0 || !game_gradient_copy(owner, &g)) {
+        say("Pick a gradient first.");
+        return;
+    }
+    live_cancel();
+    if (!bermpreview_lift()) {
+        say("Berm Preview couldn't come off the ground. Try again.");
+        return;
+    }
+    line.closed = 0, line.anchors = 2;
+    line.a[0] = pen_new_anchor(g.ax, g.az), line.a[1] = pen_new_anchor(g.bx, g.bz);
+    game_map m;
+    trace_result r;
+    if (!game_heights(&m) || !profile_trace_ground(&line, m.heights, m.width, m.cell_ft, g_trace_fit, &r)) {
+        say("Couldn't read the ground along this gradient.");
+        return;
+    }
+    const char *why = game_set_profile(owner, line.p, line.points, -1);
+    if (why) {
+        say(why);
+        return;
+    }
+    g_sec_start = g_sec_end = -1;
+    g_rng_a = g_rng_b = -1;
+    say_traced(line.points, &r);
 }
 
 void curvetool_press(int row)
 {
     if (row < 0 || row >= MAX_PANEL_ROWS)
         return;
+    if (g_row_kind[row] >= DECALTOOL_ROW) {
+        decaltool_press(g_row_kind[row], g_row_arg[row]);
+        return;
+    }
+    if (g_row_kind[row] >= STAMPTOOL_ROW) {
+        stamptool_press(g_row_kind[row], g_row_arg[row]);
+        return;
+    }
     if (g_row_kind[row] >= GRADTOOL_ROW) {
         gradtool_press(g_row_kind[row], g_row_arg[row]);
         return;
     }
     switch (g_row_kind[row]) {
-    case ROW_BRUSH_SHAPE: g_brush_shape = (g_brush_shape + 1) % 3; break;
+    case ROW_BRUSH_SHAPE: g_brush_shape = (g_brush_shape + 1) % (BRUSH_TRIANGLE + 1); break;
     case ROW_SEC_CHOICE: g_sec_list_open = !g_sec_list_open; break;
     case ROW_SEC_ITEM:
         g_sec_choice = g_row_arg[row];
@@ -1116,7 +1723,7 @@ void curvetool_press(int row)
         break;
     case ROW_SEC_RENAME:
         snprintf(g_typed, sizeof g_typed, "%s", library_get(g_sec_choice) ? library_get(g_sec_choice)->name : "");
-        g_typing = 1;
+        g_typing = TYPING_SECTION;
         g_sec_list_open = 0;
         say("Type a name: Enter keeps it, Esc cancels.");
         break;
@@ -1149,6 +1756,7 @@ void curvetool_press(int row)
         if (g_selected >= 0)
             profile_terrain(&g_curves.c[g_selected]);
         break;
+    case ROW_TRACE_GAME: game_gradient_terrain(); break;
     case ROW_FLATTEN:
         if (g_selected >= 0)
             profile_flatten(&g_curves.c[g_selected]);
@@ -1159,9 +1767,23 @@ void curvetool_press(int row)
         curvetool_set_mode(g_mode == mode ? CURVE_MODE_OFF : mode); /* a second click hands the map back to the game */
         break;
     }
+    case ROW_STAMP: curvetool_set_mode(g_mode == CURVE_MODE_STAMP ? CURVE_MODE_OFF : CURVE_MODE_STAMP); break;
     case ROW_FINISH: finish_curve(); break;
     case ROW_NEW: g_selected = -1, g_drawing = 0; break;
     case ROW_DELETE: delete_curve(g_selected); break;
+    case ROW_DUPLICATE: duplicate_curve(g_selected); break;
+    case ROW_PRE_CHOICE:
+    case ROW_PRE_ITEM:
+    case ROW_PRE_SAVE:
+    case ROW_PRE_RENAME:
+    case ROW_PRE_KEEP:
+    case ROW_PRE_CANCEL:
+    case ROW_PRE_DELETE:
+        if (g_row_kind[row] != ROW_PRE_RENAME && g_row_kind[row] != ROW_PRE_KEEP)
+            g_typing = g_typing == TYPING_PRESET ? TYPING_NONE : g_typing;
+        preset_press(g_row_kind[row], g_row_arg[row]);
+        break;
+    case ROW_RNG_CLEAR: g_rng_a = g_rng_b = -1; break;
     case ROW_SAVE: curvetool_save(); break;
     case ROW_LIVE: set_live(!g_live.on); break;
     case ROW_APPLY: apply_selected(); break;
@@ -1400,6 +2022,34 @@ static void sec_scene(scene *s)
     add_ring(s, ax + p[g_sec_start].s, az - p[g_sec_start].h, 0.9f, 0.3f, start);
 }
 
+/* The selected range on the profile graph: a gold ring on every point in it and the profile between them in gold, so
+   it's plain which points a drag moves. */
+static void range_scene(scene *s)
+{
+    static profile_point p[CURVE_MAX_POINTS];
+    int ctx = sec_context(), n, room, picked, owner;
+    double ax, az;
+    if (ctx == SEC_NONE || g_rng_a < 0 || !sec_profile(ctx, p, &n, &room, &picked, &owner) || !rng_valid(ctx, owner, n) ||
+        !graph_origin(ctx, owner, &ax, &az))
+        return;
+    int first = rng_first(), last = rng_last();
+    if (last > first) {
+        static double piece[CURVE_MAX_POINTS * 4][2];
+        int k = 0;
+        for (int i = first; i < last && k < CURVE_MAX_POINTS * 4 - 2; i++) {
+            if (p[i].type == 1) /* a Curve segment: follow it, as the outline does */
+                for (double sv = p[i].s; sv < p[i + 1].s && k < CURVE_MAX_POINTS * 4 - 2; sv += (p[i + 1].s - p[i].s) / 8)
+                    piece[k][0] = ax + sv, piece[k][1] = az - profile_height(p, n, sv), k++;
+            else
+                piece[k][0] = ax + p[i].s, piece[k][1] = az - p[i].h, k++;
+        }
+        piece[k][0] = ax + p[last].s, piece[k][1] = az - p[last].h, k++;
+        add_points(s, SCENE_LINE, (const double(*)[2])piece, k, C_MARKER);
+    }
+    for (int i = first; i <= last; i++)
+        add_ring(s, ax + p[i].s, az - p[i].h, i == g_rng_a ? 1.0f : 0.75f, 0.3f, C_MARKER);
+}
+
 void curvetool_scene(scene *out, const curve_view *v, double mpx, double mpy)
 {
     out->items = out->points = 0;
@@ -1411,4 +2061,7 @@ void curvetool_scene(scene *out, const curve_view *v, double mpx, double mpy)
     if (g_selected >= 0 && g_selected < g_curves.count)
         scene_curve(out, &g_curves.c[g_selected], 1, v, mx, mz, mpx, mpy);
     sec_scene(out);
+    range_scene(out);
+    if (g_mode == CURVE_MODE_STAMP)
+        stamptool_scene(out, mx, mz);
 }

@@ -1,7 +1,7 @@
 /* What the mod knows about mx.exe, and the game-thread side of every request.
 
    v1 is pinned to one build (SHA-256 below). Addresses are RVAs (offsets from the exe's load address), so ASLR
-   doesn't matter. Every address and offset is from docs/design.md ("What the mod touches").
+   doesn't matter. Every address and offset was found by disassembly (builds.c).
    Reads (HELLO, GET_HEIGHTS) and, from M2, height writes (SET_HEIGHTS). Every write happens here, on the game's own
    thread inside the SwapBuffers hook, and copies what the editor's brush does (mx.exe 0x140066bf0 case 4).
    MXMOD_READONLY=1 in the environment turns every write into a log line. */
@@ -40,7 +40,7 @@
 #define T_LOCKED 0x49574u     /* int, nonzero = editing locked */
 #define T_FLAGS 0x49570u      /* int, every editor edit sets 7 */
 
-/* One editor gradient (docs/game/editor-gradients-ui.md section 7). Checked against ModTest's edinfo, all 93 records. */
+/* One editor gradient. Checked against ModTest's edinfo, all 93 records. */
 typedef struct {
     void *data;
     int32_t capacity, count, stride;
@@ -71,6 +71,7 @@ static int g_readonly;     /* MXMOD_READONLY=1: writes are logged, not done */
 static char g_sha[65];
 static LONG g_frames, g_clears, g_swaps;
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 /* One request at a time from the pipe thread to the game thread. */
 enum { REQ_IDLE, REQ_PENDING, REQ_BUSY, REQ_DONE };
 static volatile LONG g_req_state = REQ_IDLE;
@@ -211,7 +212,7 @@ static void start(void)
         return;
     }
     if (!known) {
-        mx_log("unknown mx.exe build: pass-through only. Add its table to builds.c (tools/port_build.py) first.");
+        mx_log("unknown mx.exe build: pass-through only. Add its table to builds.c first.");
         HANDLE t = CreateThread(NULL, 0, say_unsupported, NULL, 0, NULL);
         if (t)
             CloseHandle(t);
@@ -224,7 +225,7 @@ static void start(void)
     g_build = build;
     g_req_done = CreateEventW(NULL, FALSE, FALSE, NULL);
     g_enabled = 1;
-    pipe_start();
+    pipe_start(); /* APP LINK: only for MX Simulator Tools, the external track app */
     ingame_start(g_base); /* on the game thread, between frames: neither hooked function is running */
 }
 
@@ -280,6 +281,7 @@ static void reply_error(const char *msg)
     g_reply_len = (uint32_t)strlen(json);
 }
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 /* The game's command line as a JSON string body (UTF-8, quotes and backslashes escaped), so the app can tell which
    track it was started with. Cut short rather than overflow. */
 static void command_line_json(char *out, size_t cap)
@@ -302,6 +304,7 @@ static void command_line_json(char *out, size_t cap)
     out[n] = 0;
 }
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 static void handle_hello(void)
 {
     track_info t;
@@ -342,6 +345,7 @@ static void handle_hello(void)
     g_reply_len = (uint32_t)n;
 }
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 static void handle_get_heights(void)
 {
     if (g_req_len != 16) {
@@ -357,7 +361,7 @@ static void handle_get_heights(void)
         return;
     }
     int col0 = r[0], row0 = r[1], cols = r[2], rows = r[3];
-    if (col0 < 0 || row0 < 0 || cols <= 0 || rows <= 0 || col0 + cols > t.width || row0 + rows > t.width) {
+    if (col0 < 0 || row0 < 0 || cols <= 0 || rows <= 0 || cols > t.width - col0 || rows > t.width - row0 /* not col0 + cols: that can overflow */) {
         reply_error("rectangle is outside the heightmap");
         return;
     }
@@ -419,8 +423,7 @@ int game_heights(game_map *out)
 }
 
 /* The write sequence is the brush's: flush the user's pending undo (first), write, widen min/max, flag the edit, mark
-   the blocks dirty, then one undo snapshot and a status line (final). Game thread only. NULL on success, else why.
-   See docs/design.md, "Applying a height patch". */
+   the blocks dirty, then one undo snapshot and a status line (final). Game thread only. NULL on success, else why. */
 const char *game_write_heights(int col0, int row0, int cols, int rows, const float *src, int first, int final)
 {
     track_info t;
@@ -431,7 +434,7 @@ const char *game_write_heights(int col0, int row0, int cols, int rows, const flo
         return "the track is locked for editing in the game";
     if (t.mouse_down)
         return "a mouse button is held in the editor; let go and try again";
-    if (cols <= 0 || rows <= 0 || col0 < 0 || row0 < 0 || col0 + cols > t.width || row0 + rows > t.width)
+    if (cols <= 0 || rows <= 0 || col0 < 0 || row0 < 0 || cols > t.width - col0 || rows > t.width - row0 /* not col0 + cols: that can overflow */)
         return "rectangle is outside the heightmap";
     size_t count = (size_t)cols * rows;
     float lo = src[0], hi = src[0];
@@ -476,6 +479,34 @@ const char *game_write_heights(int col0, int row0, int cols, int rows, const flo
     return NULL;
 }
 
+int game_mouse_held(void)
+{
+    track_info t;
+    read_track(&t);
+    return t.present && t.mouse_down;
+}
+
+int game_height_range(float *lo, float *hi)
+{
+    track_info t;
+    read_track(&t);
+    if (!t.present)
+        return 0;
+    *lo = t.min_ft, *hi = t.max_ft;
+    return 1;
+}
+
+void game_set_height_range(float lo, float hi)
+{
+    track_info t;
+    read_track(&t);
+    if (!t.present || g_readonly)
+        return;
+    *(float *)(t.terrain + T_MIN_FT) = lo;
+    *(float *)(t.terrain + T_MAX_FT) = hi;
+}
+
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 /* SET_HEIGHTS: i32 col0, row0, cols, rows, u32 flags, then cols*rows float32, written with game_write_heights. */
 static void handle_set_heights(void)
 {
@@ -591,6 +622,7 @@ static int read_gradients(gradient_info *gi)
     return 1;
 }
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 /* GRADIENTS: i32 count, selected, selected point; then per gradient f32 ax, az, bx, bz, u32 points, u32 room,
    points * (f32 s, h), points * u8 type. */
 static void handle_get_gradients(void)
@@ -630,8 +662,8 @@ static void handle_get_gradients(void)
 }
 
 /* ── Gradient Length: extend or stretch a shaped gradient while its B is dragged in Placement ──
-   The game locks a shaped gradient's length to its last point's s, so B only swings around A (docs/game/editor-gradients-ui.md
-   section 6). With Extend or Stretch on, B goes under the mouse and the profile is refitted to the new length every
+   The game locks a shaped gradient's length to its last point's s, so B only swings around A.
+   With Extend or Stretch on, B goes under the mouse and the profile is refitted to the new length every
    frame, from the profile as it was when the drag began (core/curved.py extended_points / stretched_points, the app's
    Extend and Stretch). Untouched gradients are left to the game, which already lets B follow and resets the profile. */
 #define RVA_DRAG_STATE (g_build->rva_drag_state) /* int: 1 = A or a profile point, 2 = B */
@@ -647,6 +679,69 @@ int game_editor_mode(void)
     int mode = -1;
     read_i32(g_base + RVA_EDITOR_MODE, &mode);
     return mode;
+}
+
+/* ── the game's own Radius, Focus and Granularity sliders ──
+   Each is a 64-byte slider struct, {label, value, step, min, max, ...}, in .data. The value is used only after the
+   struct's label reads what it should, so a wrong address can't be written to. Game thread only. */
+static double *slider_value(int which)
+{
+    static const char *const LABELS[] = {"Radius", "Focus", "Granularity", "Zoom"};
+    if (!g_build || which < 0 || which > GAME_SLIDER_ZOOM)
+        return NULL;
+    uint32_t rva = which == GAME_SLIDER_RADIUS      ? g_build->rva_radius
+                 : which == GAME_SLIDER_FOCUS       ? g_build->rva_focus
+                 : which == GAME_SLIDER_GRANULARITY ? g_build->rva_granularity
+                                                    : g_build->rva_zoom;
+    if (!rva)
+        return NULL;
+    uint8_t *slider = (uint8_t *)(g_base + rva - 8);
+    if (!mx_readable(slider, 40))
+        return NULL;
+    const char *label = *(const char **)slider;
+    size_t want = strlen(LABELS[which]) + 1;
+    if (!mx_readable(label, want) || memcmp(label, LABELS[which], want) != 0)
+        return NULL;
+    return (double *)(slider + 8);
+}
+
+int game_slider_get(int which, double *value, double *step, double *min, double *max)
+{
+    double *v = slider_value(which);
+    if (!v)
+        return 0;
+    *value = v[0], *step = v[1], *min = v[2], *max = v[3];
+    return 1;
+}
+
+const char *game_slider_set(int which, double value)
+{
+    double *v = slider_value(which);
+    if (!v)
+        return "This game version's brush sliders aren't known to the mod.";
+    value = value < v[2] ? v[2] : value > v[3] ? v[3] : value; /* the slider's own range */
+    if (g_readonly) {
+        mx_log("READONLY: would set slider %d to %g", which, value);
+        return NULL;
+    }
+    *v = value;
+    return NULL;
+}
+
+const char *game_slider_set_unclamped(int which, double value, double lo, double hi)
+{
+    double *v = slider_value(which);
+    if (!v)
+        return "This game version's brush sliders aren't known to the mod.";
+    if (!(value == value) || !(lo > 0) || !(hi >= lo))
+        return "Bad slider value.";
+    value = value < lo ? lo : value > hi ? hi : value;
+    if (g_readonly) {
+        mx_log("READONLY: would set slider %d to %g", which, value);
+        return NULL;
+    }
+    *v = value;
+    return NULL;
 }
 
 void game_gradient_length_frame(double mouse_x, double mouse_z, int resize)
@@ -912,6 +1007,251 @@ const char *game_gradient_insert(int index, const gradient_copy *src)
     return NULL;
 }
 
+/* ── decals (game/decals.md; addresses in builds.c, 1684 only so far) ──
+   The array is terrain+0x40 ptr, +0x48 capacity, +0x4c count, +0x50 stride (72). Edits go through the game's own calls,
+   in the order its own Decals mode uses them: replace = 0xcf70; insert = 0xc020(t, i, +1) then 0xcd50; delete = 0xcca0
+   then 0xc020(t, i, -1). Each re-bakes only the tiles the decal covers. Then +0x49570 = 7, as the game sets it. */
+#define T_DECALS 0x40u
+#define T_DECAL_CAP 0x48u
+#define T_DECAL_COUNT 0x4cu
+#define T_DECAL_STRIDE 0x50u
+typedef void (*decal_rec_fn)(void *terrain, const game_decal *rec, int i);
+typedef void (*decal_shift_fn)(void *terrain, int i, int delta);
+typedef void (*decal_remove_fn)(void *terrain, int i);
+
+/* Ported and checked: every address is there and each function still starts with the 16 bytes it was checked with.
+   Checked once; a mismatch turns the decal tools off for the session. */
+int game_decals_known(void)
+{
+    static int checked, known;
+    if (checked)
+        return known;
+    checked = 1;
+    if (!g_build || !g_build->rva_decal_replace || !g_build->rva_decal_shift || !g_build->rva_decal_insert ||
+        !g_build->rva_decal_remove || !g_build->rva_selected_decal || !g_build->rva_decal_group) {
+        mx_log("decals: this build's decal calls aren't ported, so the decal tools are off");
+        return 0;
+    }
+    uint32_t rva[4] = {g_build->rva_decal_replace, g_build->rva_decal_shift, g_build->rva_decal_insert, g_build->rva_decal_remove};
+    for (int k = 0; k < 4; k++) {
+        const void *at = (const void *)(g_base + rva[k]);
+        if (!mx_readable(at, 16) || memcmp(at, g_build->decal_sig[k], 16) != 0) {
+            mx_log("decals: the code at rva %#x isn't the one checked, so the decal tools are off", rva[k]);
+            return 0;
+        }
+    }
+    known = 1;
+    mx_log("decals: the game's decal calls checked out");
+    return 1;
+}
+
+static uintptr_t decal_terrain(void)
+{
+    uintptr_t t = 0;
+    return game_decals_known() && read_ptr(g_base + RVA_EDITOR_TERRAIN, &t) ? t : 0;
+}
+
+const game_decal *game_decal_list(int *count)
+{
+    *count = 0;
+    uintptr_t t = decal_terrain(), arr = 0;
+    int cap = 0, n = 0, stride = 0;
+    if (!t || !read_ptr(t + T_DECALS, &arr) || !read_i32(t + T_DECAL_CAP, &cap) || !read_i32(t + T_DECAL_COUNT, &n) ||
+        !read_i32(t + T_DECAL_STRIDE, &stride))
+        return NULL;
+    if (n < 0 || n > cap || cap > (1 << 22) || (n && stride != (int)sizeof(game_decal)))
+        return NULL;
+    if (n && !mx_readable((void *)arr, (size_t)n * sizeof(game_decal)))
+        return NULL;
+    *count = n;
+    return (const game_decal *)arr;
+}
+
+/* The game's group (m / M): an int vector, {ptr, capacity, count, stride 4}. NULL if it doesn't look like one. */
+static game_vector *decal_group(void)
+{
+    if (!game_decals_known())
+        return NULL;
+    game_vector *g = (game_vector *)(g_base + g_build->rva_decal_group);
+    if (!mx_readable(g, sizeof *g) || g->count < 0 || g->count > g->capacity || (g->capacity && g->stride != 4) ||
+        (g->count && !mx_readable(g->data, (size_t)g->count * 4)))
+        return NULL;
+    return g;
+}
+
+int game_decal_group_count(void)
+{
+    game_vector *g = decal_group();
+    return g ? g->count : -1;
+}
+
+int game_decal_selected(void)
+{
+    int sel = -1, n;
+    if (!game_decals_known() || !read_i32(g_base + g_build->rva_selected_decal, &sel) || !game_decal_list(&n))
+        return -1;
+    return sel >= 0 && sel < n ? sel : -1;
+}
+
+void game_decal_select(int i)
+{
+    int n;
+    if (game_decals_known() && game_decal_list(&n) && i >= -1 && i < n && !g_readonly)
+        *(int *)(g_base + g_build->rva_selected_decal) = i;
+}
+
+/* Decals mode doesn't check the edit lock itself; the tools do. A button held by the game is its drag. */
+const char *game_decal_editable(void)
+{
+    track_info t;
+    read_track(&t);
+    if (!game_decals_known())
+        return "This game version's decal edits aren't known to the mod.";
+    if (!t.present)
+        return "No track is open in the editor.";
+    if (t.locked)
+        return "The editor has this track locked for editing.";
+    if (t.mouse_down)
+        return "Let go of the mouse button first.";
+    int n;
+    if (!game_decal_list(&n))
+        return "The game's decal list couldn't be read.";
+    return NULL;
+}
+
+static const char *decal_check(const game_decal *d)
+{
+    float v[5] = {d->x, d->z, d->rot, d->size, d->f5};
+    for (int k = 0; k < 5; k++)
+        if (!(v[k] > -1e6f && v[k] < 1e6f))
+            return "That decal's numbers aren't usable.";
+    if (!(d->size > 0) || !(d->f5 > 0))
+        return "A decal needs a size and stretch above 0.";
+    return NULL;
+}
+
+static void decal_modified(uintptr_t t) { *(int *)(t + T_FLAGS) = 7; }
+
+/* The trig the replace writes is the caller's; here it's checked, since the bins and drawing only use +0x20/+0x24. */
+static const char *replace_now(int i, const game_decal *d)
+{
+    int n;
+    uintptr_t t = decal_terrain();
+    if (!t || !game_decal_list(&n) || i < 0 || i >= n)
+        return "That decal isn't there any more.";
+    const char *why = decal_check(d);
+    if (why)
+        return why;
+    if (g_readonly) {
+        mx_log("READONLY: would replace decal %d", i);
+        return NULL;
+    }
+    ((decal_rec_fn)(g_base + g_build->rva_decal_replace))((void *)t, d, i);
+    decal_modified(t);
+    return NULL;
+}
+
+const char *game_decal_replace(int i, const game_decal *d)
+{
+    const char *why = game_decal_editable();
+    return why ? why : replace_now(i, d);
+}
+
+int game_decal_fix_trig(int i)
+{
+    int n;
+    const game_decal *list = game_decal_list(&n);
+    if (!list || i < 0 || i >= n)
+        return 0;
+    game_decal d = list[i];
+    float s = sinf(d.rot), c = cosf(d.rot);
+    if (fabsf(d.sin_rot - s) < 1e-5f && fabsf(d.cos_rot - c) < 1e-5f)
+        return 0;
+    track_info t;
+    read_track(&t);
+    if (!t.present || t.locked)
+        return 0;
+    /* Allowed during the game's own rotate drag: it calls the same replace on every move; this only corrects its trig. */
+    d.sin_rot = s, d.cos_rot = c;
+    return replace_now(i, &d) == NULL;
+}
+
+const char *game_decal_insert(int i, const game_decal *d)
+{
+    const char *why = game_decal_editable();
+    if (why)
+        return why;
+    if ((why = decal_check(d)) != NULL)
+        return why;
+    int n;
+    game_decal_list(&n);
+    game_vector *group = decal_group();
+    if (i < 0 || i > n)
+        return "That's not a place in the decal list.";
+    if (!group)
+        return "The game's decal group couldn't be read.";
+    if (g_readonly) {
+        mx_log("READONLY: would insert a decal at %d", i);
+        return NULL;
+    }
+    uintptr_t t = decal_terrain();
+    /* As the game's copy does (0xe2d10, 1684): group entries from i up move up one, then the bins, then the insert. */
+    int *gi = (int *)group->data;
+    for (int k = 0; k < group->count; k++)
+        if (gi[k] >= i)
+            gi[k]++;
+    ((decal_shift_fn)(g_base + g_build->rva_decal_shift))((void *)t, i, 1);
+    ((decal_rec_fn)(g_base + g_build->rva_decal_insert))((void *)t, d, i);
+    *(int *)(g_base + g_build->rva_selected_decal) = i;
+    decal_modified(t);
+    mx_log("decals: inserted at %d (%d now)", i, n + 1);
+    return NULL;
+}
+
+const char *game_decal_delete(int i)
+{
+    const char *why = game_decal_editable();
+    if (why)
+        return why;
+    int n;
+    game_decal_list(&n);
+    game_vector *group = decal_group();
+    if (i < 0 || i >= n)
+        return "That decal isn't there any more.";
+    if (!group)
+        return "The game's decal group couldn't be read.";
+    if (g_readonly) {
+        mx_log("READONLY: would delete decal %d", i);
+        return NULL;
+    }
+    uintptr_t t = decal_terrain();
+    /* As the game's delete does (0xe2610, 1684): out of the group, the decal, the group's later entries down one, the
+       bins, then the selection (-1 if it was this one, one down if it was later; no selection empties the group). */
+    int *gi = (int *)group->data;
+    for (int k = 0; k < group->count; k++)
+        if (gi[k] == i) {
+            memmove(&gi[k], &gi[k + 1], (size_t)(group->count - k - 1) * 4);
+            group->count--;
+            break;
+        }
+    ((decal_remove_fn)(g_base + g_build->rva_decal_remove))((void *)t, i);
+    for (int k = 0; k < group->count; k++)
+        if (gi[k] >= i)
+            gi[k]--;
+    ((decal_shift_fn)(g_base + g_build->rva_decal_shift))((void *)t, i, -1);
+    int *sel = (int *)(g_base + g_build->rva_selected_decal);
+    if (*sel == i)
+        *sel = -1;
+    else if (*sel > i)
+        (*sel)--;
+    if (*sel == -1)
+        group->count = 0;
+    decal_modified(t);
+    mx_log("decals: deleted %d (%d left)", i, n - 1);
+    return NULL;
+}
+
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 /* SET_GRADIENT: i32 index, f32 ax, az, bx, bz, u32 n, n * (f32 s, h), n * u8 type. Rewrites one gradient in place;
    refused if the points don't fit in the room it already has (growing it needs the game's allocator, not done yet). */
 static void handle_set_gradient(void)
@@ -997,7 +1337,8 @@ static void handle_set_gradient(void)
     g_reply_len = (uint32_t)len;
 }
 
-/* SET_SCENE: JSON, what to draw over the editor (docs/ingame-tools.md section 4). Replaces the last one. */
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
+/* SET_SCENE: JSON, what to draw over the editor (protocol.h). Replaces the last one. */
 static void handle_set_scene(void)
 {
     const char *why = scene_set((const char *)g_req_payload, g_req_len);
@@ -1016,6 +1357,7 @@ static void handle_set_scene(void)
     g_reply_len = (uint32_t)len;
 }
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 /* GET_EVENTS: the game's mouse and keys while our tool is on, and the view, as JSON (empties the mod's queue). */
 static void handle_get_events(void)
 {
@@ -1028,6 +1370,7 @@ static void handle_get_events(void)
     g_reply = json;
 }
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 static void service_request(void)
 {
     if (InterlockedCompareExchange(&g_req_state, REQ_BUSY, REQ_PENDING) != REQ_PENDING)
@@ -1082,6 +1425,7 @@ void mod_on_clear(void)
     }
 }
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 int mod_request(uint32_t type, const void *payload, uint32_t length,
                 uint32_t *out_type, void **out, uint32_t *out_length, DWORD timeout_ms)
 {

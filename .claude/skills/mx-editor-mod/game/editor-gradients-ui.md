@@ -4,7 +4,7 @@
 when one changes, change the other. Mentions of the app's files (`web/`, `core/`) are that repo's.*
 
 Target: mx.exe SHA-256 54676784e8f2e87f9043d8e97b6c421402af89abeebb52cee00972703bada392, Ghidra 12.1.4 via REA, Nov 4 2026.
-All facts **(verified)** from the exe unless tagged. Complements the math in `docs/game/track-editor-gradients.md`
+All facts **(verified)** from the exe unless tagged. Complements the math in `game/track-editor-gradients.md`
 (profile Hermite, linear/radial `s`, brush smoothstep), which is unchanged.
 
 ## 0. View and units
@@ -216,7 +216,12 @@ Last rows of the panel: the cursor `x y z` (`%.2f %.2f %.2f`, y = ground height 
   - If the statue is closer to the line A to B than |s* - d|, it moves to its projection on the line, turned to face
     along the line.
   - Otherwise it slides along the direction from A to the statue until it is exactly s* from A (onto the circle that a
-    radial gradient makes at that point), turned to face A.
+    radial gradient makes at that point). Turned: on 1684 (0x1400e38e0, button 0x23) the angle is
+    atan2(A.z - S.z, S.x - A.x), with the x and z terms swapped compared with the line case's atan2(-dx, -dz), so it
+    reads as **tangent to the ring** (along the berm), not facing A **(unverified in game)**.
+  - The line is A to B extended both ways (the projection is not clamped). Needs a selected statue and a selected
+    gradient (select it in Placement or Edit first; the selection carries across modes). Does nothing while the
+    edit lock is set. It is a panel button only: no key runs it.
   - Turning is skipped when rot >= 3.25. The yaw is wrapped to (-pi, pi] and keeps the upright flag (minus 4*pi).
     y is set to 0 (on the ground). Exact facing sign is not checked in game **(unverified)**.
 

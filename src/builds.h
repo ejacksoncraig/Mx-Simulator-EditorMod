@@ -60,6 +60,18 @@ typedef struct {
     uint32_t rva_game_free;      /* void (void *): its free */
     uint32_t rva_radial_height;  /* float (float x, float z): Gradient Radial's profile height at a cell */
     uint32_t rva_profile_height; /* float (float s): the selected gradient's profile height at s */
+    /* double: the game's Radius, Focus and Granularity sliders' values (each at +8 in its 64-byte slider struct, whose
+       label pointer at +0 the mod checks before using it). Found by the slider structs' labels in .data. */
+    uint32_t rva_radius, rva_focus, rva_granularity;
+    /* Decals (decal tools, Decals mode 15; .claude/skills/mx-editor-mod/game/decals.md). 0 = not ported: the decal tools
+       stay off on that build. Each function's first 16 bytes are in decal_sig, checked before the first call. */
+    uint32_t rva_decal_replace; /* void (terrain *, const rec *, int i): replace decal i and re-bake its old and new tiles */
+    uint32_t rva_decal_shift;   /* void (terrain *, int i, int delta): add delta to every bin entry >= i */
+    uint32_t rva_decal_insert;  /* void (terrain *, const rec *, int i): insert at i (grows the array) and bin it */
+    uint32_t rva_decal_remove;  /* void (terrain *, int i): un-bin and remove decal i */
+    uint32_t rva_selected_decal; /* int: Decals mode's selected decal, -1 none */
+    uint32_t rva_decal_group;   /* {int *ptr; int cap, count, stride}: Decals mode's group of selected indices */
+    unsigned char decal_sig[4][16]; /* replace, shift, insert, remove */
 } mx_build;
 
 extern const mx_build *g_build; /* the running one; NULL until game.c finds it */

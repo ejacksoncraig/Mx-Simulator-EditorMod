@@ -1,13 +1,12 @@
 """Generate the proxy's export table from tools/exports.txt.
 
-Every opengl32 export becomes a one-instruction stub that jumps to the real function (loaded at startup into
-`real_table`), except the few the mod hooks, which point at C functions instead.
+Every opengl32 export becomes a two-instruction stub that jumps to the real function through `real_table`, except
+the few the mod hooks, which point at C functions instead. The real opengl32 is loaded at the first GL call (mx_lazy).
 
 Writes into src/:
   exports_gen.h   names + count, compiled into proxy.c
-  opengl32.def    export table (both toolchains)
+  opengl32.def    export table
   stubs_masm.asm  stubs for MSVC (ml64)
-  stubs_gas.S     stubs for mingw-w64 (gcc)
 
     python tools/gen_exports.py                # from exports.txt
     python tools/gen_exports.py --from-system  # first re-read C:\\Windows\\System32\\opengl32.dll (Windows only)
@@ -87,16 +86,32 @@ def generate(names: list[str], out: Path = SRC) -> None:
     deff += [f"    {n}" for n in EXTRA]
     (out / "opengl32.def").write_text("\n".join(deff) + "\n")
 
-    masm = [f"; {banner}", "EXTERN real_table:QWORD", ".code"]
-    gas = [f"# {banner}", ".intel_syntax noprefix", ".text"]
+    masm = [f"; {banner}", "EXTERN real_table:QWORD", "EXTERN mx_load_real:PROC", ".code", "",
+            # Every real_table entry starts out pointing here, so the real opengl32 is loaded at the first GL call,
+            # not inside DllMain. eax holds the export's index (set by its stub). The call's arguments (rcx, rdx,
+            # r8, r9, xmm0-3) are kept across the load, then it jumps on to the real function as if called directly.
+            # 0A8h keeps rsp 16-byte aligned for the call (it's 8 mod 16 on entry).
+            "mx_lazy PROC FRAME", "    sub rsp, 0A8h", "    .allocstack 0A8h", "    .endprolog",
+            "    mov [rsp+60h], rcx", "    mov [rsp+68h], rdx", "    mov [rsp+70h], r8", "    mov [rsp+78h], r9",
+            "    mov [rsp+80h], rax",
+            "    movdqu [rsp+20h], xmm0", "    movdqu [rsp+30h], xmm1", "    movdqu [rsp+40h], xmm2",
+            "    movdqu [rsp+50h], xmm3",
+            "    call mx_load_real",
+            "    movdqu xmm0, [rsp+20h]", "    movdqu xmm1, [rsp+30h]", "    movdqu xmm2, [rsp+40h]",
+            "    movdqu xmm3, [rsp+50h]",
+            "    mov rax, [rsp+80h]",
+            "    mov rcx, [rsp+60h]", "    mov rdx, [rsp+68h]", "    mov r8, [rsp+70h]", "    mov r9, [rsp+78h]",
+            "    add rsp, 0A8h",
+            "    lea r10, real_table",
+            "    jmp QWORD PTR [r10 + rax*8]",
+            "mx_lazy ENDP", ""]
     for i, n in enumerate(names):
         if n in HOOKED:
             continue
-        masm += [f"stub_{n} PROC", f"    jmp QWORD PTR [real_table + {i * 8}]", f"stub_{n} ENDP"]
-        gas += [f".globl stub_{n}", f"stub_{n}:", f"    jmp QWORD PTR [rip + real_table + {i * 8}]"]
+        masm += [f"stub_{n} PROC", f"    mov eax, {i}", f"    jmp QWORD PTR [real_table + {i * 8}]",
+                 f"stub_{n} ENDP"]
     masm.append("END")
     (out / "stubs_masm.asm").write_text("\n".join(masm) + "\n")
-    (out / "stubs_gas.S").write_text("\n".join(gas) + "\n")
 
 
 def main() -> int:

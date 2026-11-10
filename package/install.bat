@@ -2,6 +2,14 @@
 rem MX Simulator Tools editor mod: copies opengl32.dll into the game folder. Offline editor use only.
 setlocal
 
+rem The mod's DLL: beside this script (a players' zip), else the repo's build folder (run from a clone).
+rem Only ever install this mod: the DLL must be ours (it has the mxmod_version export).
+set "SRC=%~dp0opengl32.dll"
+if not exist "%SRC%" set "SRC=%~dp0..\build\opengl32.dll"
+if not exist "%SRC%" goto nodll
+findstr /m "mxmod_version" "%SRC%" >nul
+if errorlevel 1 goto nodll
+
 rem The game folder needs admin to write: ask for it once.
 net session >nul 2>&1
 if errorlevel 1 goto elevate
@@ -27,20 +35,23 @@ if "%GAME:~-1%"==" " set "GAME=%GAME:~0,-1%"
 if "%GAME:~-1%"=="\" set "GAME=%GAME:~0,-1%"
 if not exist "%GAME%\mx.exe" goto nogame
 :found
-echo Game folder: %GAME%
+echo Game folder: "%GAME%"
 tasklist /fi "imagename eq mx.exe" | find /i "mx.exe" >nul
 if not errorlevel 1 goto running
 
+set "RENAMED="
 if not exist "%GAME%\opengl32.dll" goto copy
 findstr /m "mxmod_version" "%GAME%\opengl32.dll" >nul
 if not errorlevel 1 goto copy
 rem Another opengl32.dll is there (MXS Shaders?): keep it as opengl32_mxs.dll, which the mod loads.
 if exist "%GAME%\opengl32_mxs.dll" goto both
 ren "%GAME%\opengl32.dll" opengl32_mxs.dll
+if errorlevel 1 goto failed
+set "RENAMED=1"
 echo Kept your existing opengl32.dll as opengl32_mxs.dll; the mod loads it, so it keeps working.
 
 :copy
-copy /y "%~dp0opengl32.dll" "%GAME%\opengl32.dll" >nul
+copy /y "%SRC%" "%GAME%\opengl32.dll" >nul
 if errorlevel 1 goto failed
 echo Installed. Start the game with:  mx.exe --editor   and open any track.
 echo Online play is blocked while the mod is installed: run uninstall.bat to play online.
@@ -48,7 +59,10 @@ pause
 exit /b 0
 
 :elevate
-powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath '%~f0'"
+rem The script's path goes through an environment variable, never into the command text, so no folder name can
+rem break or change the command.
+set "MXMOD_SELF=%~f0"
+powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath $env:MXMOD_SELF"
 exit /b 0
 :fromreg
 rem The folder of the uninstaller the game's installer registered under key %1, if there is one.
@@ -74,5 +88,14 @@ pause
 exit /b 1
 :failed
 echo Couldn't copy opengl32.dll into "%GAME%".
+rem Put the other mod's DLL back under its own name, so a failed install leaves the folder as it was.
+if defined RENAMED ren "%GAME%\opengl32_mxs.dll" opengl32.dll
+if defined RENAMED echo Your original opengl32.dll was put back.
+pause
+exit /b 1
+:nodll
+echo No MX Simulator Tools editor mod opengl32.dll found next to this script or in ..\build. Nothing was changed.
+echo From a download: extract the whole zip first (right-click it, Extract All), then run install.bat from that folder.
+echo From the repo: run build.bat first.
 pause
 exit /b 1

@@ -1,4 +1,4 @@
-/* The app's tools inside the game's editor (docs/ingame-tools.md). M5: two inline hooks and a test draw.
+/* The app's tools inside the game's editor. M5: two inline hooks and a test draw.
 
    Hook A wraps the editor's 2D draw (0x1400613b0): the original runs, then we draw on top with the game's own helpers,
    which record into the same command list, so it shows in the same frame. Hook B wraps the key and mouse button
@@ -6,7 +6,7 @@
 
    Both targets start with the same 19 bytes (push r15..rbx, sub rsp imm32), with nothing RIP-relative, so the hook is
    a 14-byte absolute jump and the trampoline runs those 19 bytes and jumps back. The bytes are checked before patching
-   and put back when the DLL unloads. Offline only, --editor only (docs/design.md, rule 2). */
+   and put back when the DLL unloads. Offline only, --editor only. */
 #include "mod.h"
 #include "curvetool.h"
 
@@ -116,13 +116,22 @@ static int hook_install(hook *h, uintptr_t base, uint32_t rva, uint32_t frame, v
         mx_log("hook %s: prologue isn't the one checked (%s), not patching", h->name, hex);
         return 0;
     }
-    h->trampoline = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    /* Written while read-write, then made execute + read only: never writable and executable at once. */
+    h->trampoline = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!h->trampoline) {
         mx_log("hook %s: no memory for the trampoline", h->name);
         return 0;
     }
     memcpy(h->trampoline, h->target, PATCH_LEN);
     abs_jump(h->trampoline + PATCH_LEN, h->target + PATCH_LEN);
+    DWORD old;
+    if (!VirtualProtect(h->trampoline, 64, PAGE_EXECUTE_READ, &old)) {
+        mx_log("hook %s: couldn't make the trampoline executable (%lu)", h->name, GetLastError());
+        VirtualFree(h->trampoline, 0, MEM_RELEASE);
+        h->trampoline = NULL;
+        return 0;
+    }
+    FlushInstructionCache(GetCurrentProcess(), h->trampoline, 64);
     memcpy(h->saved, h->target, PATCH_LEN);
     unsigned char patch[PATCH_LEN];
     abs_jump(patch, detour);
@@ -154,7 +163,7 @@ static volatile LONG g_presses;
 static volatile LONG g_draw_calls, g_overlay_runs, g_key_calls;
 static const char *g_skip = "";
 static float g_last[8]; /* w, h, ortho x, ortho y, units wide, units per ft, map x0 in units, view ft */
-/* The game's other widgets (verified by disassembly, docs/ingame-tools.md section 2). */
+/* The game's other widgets (verified by disassembly). */
 #define RVA_CHOICE (g_build->rva_choice)        /* void(choice *, int on, float *pos, float *scale, float width, float align, float split) */
 #define RVA_SLIDER (g_build->rva_slider)        /* void(slider *, int on, float *pos, float *scale, float width, float align, float split) */
 #define RVA_READOUT (g_build->rva_readout)       /* void(const char *text, const float *colour a, const float *colour b, float width, int) */
@@ -363,8 +372,10 @@ static void overlay_draw(void)
     curvetool_scene(&g_own, &cv, mouse_x(), mouse_y());
     double mouse_wx = (mouse_x() - w / 2) / (double)h * view_ft + cv.cx, mouse_wz = (mouse_y() - h / 2) / (double)h * view_ft + cv.cz;
     brush_outline(&g_own, &cv, mouse_wx, mouse_wz);
-    if (curvetool_mode() == CURVE_MODE_OFF)
+    if (curvetool_mode() == CURVE_MODE_OFF) {
         gradtool_scene(&g_own, mouse_wx, mouse_wz);
+        decaltool_scene(&g_own, mouse_wx, mouse_wz, view_ft / h);
+    }
     float unit_px = h / 64.0f, wide = units_wide();
     int *batch = *(int **)(g_base + RVA_PTR_BATCH_FLAG);
     map_view v = {*(float *)(g_base + RVA_VIEW_X), *(float *)(g_base + RVA_VIEW_Z), 64.0f / view_ft, wide * 0.5f};
@@ -472,6 +483,15 @@ static int current_view(curve_view *v)
     return v->h > 0;
 }
 
+int ingame_view(double *view_ft, int *screen_h)
+{
+    curve_view v;
+    if (!g_base || !pointers_ok() || !current_view(&v))
+        return 0;
+    *view_ft = v.view_ft, *screen_h = v.h;
+    return 1;
+}
+
 static void world_at(int px, int py, float *x, float *z)
 {
     int w = win_w(), h = win_h();
@@ -480,6 +500,7 @@ static void world_at(int px, int py, float *x, float *z)
     *z = (float)(py - h / 2) / h * view + *(float *)(g_base + RVA_VIEW_Z);
 }
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 static void queue(int t, int key, int down)
 {
     if (g_event_count == MAX_EVENTS) {
@@ -526,22 +547,110 @@ static int always_the_games(int key, const int *codes)
 static void gradient_length_now(void);
 static void brush_frame(void);
 
+/* ── the mouse wheel zooms the editor ──
+   The game's editor only zooms with = and - (0xeb668 on 1684, 0x655c8 on 1.0): each adds or takes 0.5 off the Zoom
+   slider's value (-3..8) and nothing else; it never acts on the wheel. So the game's window is subclassed for
+   WM_MOUSEWHEEL alone (on the game thread, which pumps its messages): a notch is a quarter of a key press, and the
+   ground under the cursor stays under it. Only while the editor is drawing and the mouse is on the map. */
+#define WHEEL_ZOOM_STEP 0.25
+static HWND g_hwnd;
+static WNDPROC g_old_proc;
+static int g_wheel_rest;                    /* part notches from fine-grained wheels */
+static LONG g_frame_no, g_editor_frame = -100; /* frames, and the last one the editor drew in */
+
+static void wheel_zoom(int delta)
+{
+    g_wheel_rest += delta;
+    int notches = g_wheel_rest / WHEEL_DELTA;
+    g_wheel_rest -= notches * WHEEL_DELTA;
+    if (!notches || !pointers_ok() || over_our_panel() || mouse_x() < 21.25f * (win_h() / 64.0f))
+        return;
+    double zoom, step, lo, hi;
+    if (!game_slider_get(GAME_SLIDER_ZOOM, &zoom, &step, &lo, &hi))
+        return;
+    float wx, wz;
+    world_at(mouse_x(), mouse_y(), &wx, &wz); /* the ground under the cursor, before */
+    double next = zoom + notches * WHEEL_ZOOM_STEP;
+    next = next < lo ? lo : next > hi ? hi : next;
+    if (next == zoom || game_slider_set(GAME_SLIDER_ZOOM, next))
+        return;
+    /* The same point under the cursor at the new zoom: centre = point - (mouse - middle) / H * viewFt. */
+    float view = view_ft_now();
+    int w = win_w(), h = win_h();
+    if (!(view > 0) || h <= 0)
+        return;
+    *(float *)(g_base + RVA_VIEW_X) = wx - (float)(mouse_x() - w / 2) / h * view;
+    *(float *)(g_base + RVA_VIEW_Z) = wz - (float)(mouse_y() - h / 2) / h * view;
+}
+
+static LRESULT CALLBACK wheel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_MOUSEWHEEL && g_frame_no - g_editor_frame <= 2) {
+        wheel_zoom(GET_WHEEL_DELTA_WPARAM(wp));
+        return 0;
+    }
+    return CallWindowProcW(g_old_proc, hwnd, msg, wp, lp);
+}
+
+static BOOL CALLBACK find_game_window(HWND hwnd, LPARAM out)
+{
+    RECT r;
+    if (IsWindowVisible(hwnd) && GetClientRect(hwnd, &r) && r.right > 0 && r.bottom > 0) {
+        *(HWND *)out = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* Once, from the game thread: its own visible top-level window. */
+static void wheel_hook(void)
+{
+    if (g_hwnd)
+        return;
+    HWND hwnd = NULL;
+    EnumThreadWindows(GetCurrentThreadId(), find_game_window, (LPARAM)&hwnd);
+    if (!hwnd)
+        return;
+    g_old_proc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)wheel_proc);
+    if (!g_old_proc) {
+        mx_log("mouse wheel zoom: couldn't hook the game's window (%lu)", GetLastError());
+        g_hwnd = (HWND)1; /* don't try again every frame */
+        return;
+    }
+    g_hwnd = hwnd;
+    mx_log("mouse wheel zoom on (window %p)", (void *)hwnd);
+}
+
+static void wheel_unhook(void)
+{
+    if (g_hwnd && g_hwnd != (HWND)1 && g_old_proc && (WNDPROC)GetWindowLongPtrW(g_hwnd, GWLP_WNDPROC) == wheel_proc)
+        SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_old_proc);
+    g_hwnd = NULL;
+}
+
 /* Each frame (SwapBuffers): one move when the mouse moved and our tool is on, or a button is held on our panel. */
 void ingame_frame(void)
 {
+    InterlockedIncrement(&g_frame_no);
     if (!g_base || !g_draw.installed || !pointers_ok())
         return;
+    wheel_hook();
     curvetool_frame();
     gradtool_frame();
+    decaltool_frame();
     gradient_length_now();
     brush_frame();
     int px = mouse_x(), py = mouse_y();
     if ((px != g_last_px || py != g_last_py) && g_slide_row >= 0 && g_slide_row < g_row_count) {
         slide_to_mouse(g_slide_row);
+    } else if ((px != g_last_px || py != g_last_py) && decaltool_dragging()) {
+        float x, z;
+        world_at(px, py, &x, &z);
+        decaltool_move(x, z, (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0, (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
     } else if ((px != g_last_px || py != g_last_py) && curvetool_dragging()) {
         curve_view v;
         if (current_view(&v))
-            curvetool_mouse(&v, CURVE_MOVE, px, py, 0, (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
+            curvetool_mouse(&v, CURVE_MOVE, px, py, 0, (GetAsyncKeyState(VK_MENU) & 0x8000) != 0, 0);
     } else if ((px != g_last_px || py != g_last_py) && (tool_on() || g_map_press) && curvetool_mode() == CURVE_MODE_OFF) {
         queue(EV_MOVE, 0, 0);
     }
@@ -550,6 +659,7 @@ void ingame_frame(void)
 
 static const char *const EVENT_NAMES[] = {"", "down", "up", "move", "key", "toolOff"};
 
+/* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 /* Hand the queued events to the app as JSON, with the view they go with, and empty the queue. */
 int ingame_events_json(char *out, size_t cap)
 {
@@ -579,7 +689,7 @@ int ingame_events_json(char *out, size_t cap)
     return (int)n;
 }
 
-/* ── brush shapes: a patch in the game's brush loop (docs/ingame-tools.md, "Brush shapes") ──
+/* ── brush shapes: a patch in the game's brush loop ──
    At 0x140060035 the loop has the offset from a cell to the stroke in xmm2 (x) and xmm0 (z) and turns it into a
    distance (square, add, sqrt), which the inner/outer smoothstep and every mode but Smooth then use. While a shape
    other than Circle is chosen, those 37 bytes jump to brush_stub.asm, which asks mx_brush_distance. */
@@ -595,6 +705,31 @@ static int g_brush_patched, g_brush_refused;
 static volatile float g_brush_outer, g_brush_inner; /* the last stroke's, for the outline */
 static int g_brush_shape;
 static double g_brush_cos = 1, g_brush_sin = 0, g_brush_square_scale = 1, g_brush_oval = 0.5;
+static double g_tri_vert[3][2], g_tri_edge[3][2];
+
+/* The triangle at radius 1: base along z with the given width for a height of 1 along +x, its tip over the base's middle
+   at lean 0 and straight over an end of the base at lean -1 or 1, which makes a right angle there. The brush centre is
+   the centroid, and the corner farthest from it is on the radius, so the whole shape stays in the brush's round reach.
+   Each edge's measure is its normal over its distance from the centre, so it reads 1 along that edge. */
+static void tri_shape(double width, double lean)
+{
+    double v[3][2] = {{1, lean * width / 2}, {0, width / 2}, {0, -width / 2}};
+    double cx = (v[0][0] + v[1][0] + v[2][0]) / 3, cz = (v[0][1] + v[1][1] + v[2][1]) / 3, reach = 0;
+    for (int i = 0; i < 3; i++) {
+        v[i][0] -= cx, v[i][1] -= cz;
+        double r = sqrt(v[i][0] * v[i][0] + v[i][1] * v[i][1]);
+        if (r > reach)
+            reach = r;
+    }
+    for (int i = 0; i < 3; i++)
+        g_tri_vert[i][0] = v[i][0] / reach, g_tri_vert[i][1] = v[i][1] / reach;
+    for (int i = 0; i < 3; i++) {
+        const double *p = g_tri_vert[i], *q = g_tri_vert[(i + 1) % 3];
+        double nx = q[1] - p[1], nz = p[0] - q[0]; /* the distance below is signed, so either normal works */
+        double h = nx * p[0] + nz * p[1];
+        g_tri_edge[i][0] = nx / h, g_tri_edge[i][1] = nz / h;
+    }
+}
 
 /* The distance the brush measures, in feet: the game's own for a circle (same float steps), else the shape's. The
    outer edge of the shape is where this reaches the brush's outer radius. */
@@ -608,6 +743,17 @@ float mx_brush_distance(float dz, float dx, float outer, float inner)
     double lx = dx * g_brush_cos + dz * g_brush_sin, lz = -dx * g_brush_sin + dz * g_brush_cos;
     if (g_brush_shape == BRUSH_SQUARE)
         return (float)((fabs(lx) > fabs(lz) ? fabs(lx) : fabs(lz)) * g_brush_square_scale);
+    if (g_brush_shape == BRUSH_TRIANGLE) {
+        /* The largest of the three edges' measures (tri_shape), each 1 on its edge of the unit triangle. Unlike the other
+           shapes this isn't the same at -offset: the game's offset is always cell minus stroke, in all the loop's cases. */
+        double most = 0;
+        for (int i = 0; i < 3; i++) {
+            double d = g_tri_edge[i][0] * lx + g_tri_edge[i][1] * lz;
+            if (d > most)
+                most = d;
+        }
+        return (float)most;
+    }
     return (float)sqrt(lx * lx + (lz / g_brush_oval) * (lz / g_brush_oval));
 }
 
@@ -714,6 +860,7 @@ static void brush_frame(void)
     /* A turned square sits inside the brush's round reach (the game only visits cells within it), so its corners fit. */
     g_brush_square_scale = fmod(curvetool_brush_angle(), 90.0) != 0 ? sqrt(2.0) : 1;
     g_brush_oval = curvetool_brush_oval();
+    tri_shape(curvetool_brush_tri_width(), curvetool_brush_tri_lean());
     brush_patch(g_brush_shape != BRUSH_CIRCLE);
 }
 
@@ -733,12 +880,14 @@ static void brush_outline(scene *s, const curve_view *v, double mx, double mz)
         memset(it, 0, sizeof *it);
         it->kind = SCENE_LINE, it->closed = 1, it->first = s->points;
         memcpy(it->rgba, k ? inside : edge, sizeof it->rgba);
-        int n = g_brush_shape == BRUSH_SQUARE ? 4 : 64;
+        int n = g_brush_shape == BRUSH_SQUARE ? 4 : g_brush_shape == BRUSH_TRIANGLE ? 3 : 64;
         for (int i = 0; i < n; i++) {
             double lx, lz;
             if (g_brush_shape == BRUSH_SQUARE) {
                 static const double corner[4][2] = {{1, 1}, {-1, 1}, {-1, -1}, {1, -1}};
                 lx = corner[i][0] * radii[k] / g_brush_square_scale, lz = corner[i][1] * radii[k] / g_brush_square_scale;
+            } else if (g_brush_shape == BRUSH_TRIANGLE) {
+                lx = g_tri_vert[i][0] * radii[k], lz = g_tri_vert[i][1] * radii[k];
             } else {
                 double a = i * 2 * 3.14159265358979 / n;
                 lx = cos(a) * radii[k], lz = sin(a) * radii[k] * g_brush_oval;
@@ -769,12 +918,15 @@ static uintptr_t draw_detour(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d)
     gradient_length_now();
     uintptr_t r = ((draw_fn)(void *)g_draw.trampoline)(a, b, c, d);
     InterlockedIncrement(&g_draw_calls);
+    g_editor_frame = g_frame_no; /* the editor is on screen: the wheel zooms it */
     overlay_draw();
     return r;
 }
 
 static int g_our_press;   /* the left button went down on our panel, so its release is ours too */
 static int g_place_press; /* the left button placed a saved gradient, so its release is ours too */
+static int g_graph_press; /* the left button selected or dragged a range on the game's Gradient Edit graph */
+static int g_decal_press; /* the left button picked a decal or grabbed one of its handles in Decals mode */
 
 static int key_detour(int key, int down)
 {
@@ -801,15 +953,62 @@ static int key_detour(int key, int down)
             g_slide_row = -1;
             return 1;
         }
+        if (key == left && !down && g_decal_press) {
+            /* The game never saw this press (a decal picked, or a handle dragged), so it doesn't see the release. */
+            g_decal_press = 0;
+            decaltool_up();
+            return 1;
+        }
+        if (key == left && !down && g_graph_press) {
+            /* The game never saw this press (a range selected or dragged on its graph), so it doesn't see the release. */
+            g_graph_press = 0;
+            curve_view gv;
+            if (current_view(&gv))
+                curvetool_mouse(&gv, CURVE_UP, mouse_x(), mouse_y(), 0, 0, 0);
+            return 1;
+        }
         /* Typing a section's name: every key is ours (the game would act on s, f, numbers...); the mouse still works. */
         if (curvetool_typing() && key != left) {
             if (down && key < 0x1000)
                 curvetool_type(key); /* each key also comes as a raw 0x10xx code; the character is the one */
             return 1;
         }
+        /* The game is about to read the ground: `s` or the Save button saves it (0x14005bcb0, called from just these two
+           places), `p` exports it, a widget like Set From Terrain samples it, a mode key can start a brush on it. Previews
+           come off first, while the game hasn't seen the press. One that can't come off stops the key: a track file must
+           never get a preview in it. */
+        if (down && (key == 's' || key == 'p' || (key >= '0' && key <= '9') || *(int *)(g_base + RVA_HOVERED_WIDGET) >= 0)) {
+            int off = stamptool_before_save();
+            off &= curvetool_before_save();
+            off &= bermpreview_lift();
+            if (!off) {
+                static const char *const STILL_ON = "A preview couldn't come off the ground, so that didn't run. Let go of the mouse and try again.";
+                game_status(STILL_ON);
+                mx_log("%s", STILL_ON);
+                if (key == left)
+                    g_our_press = 1; /* the game didn't see this press, so it mustn't see the release */
+                return 1;
+            }
+        }
         if (curvetool_mode() == CURVE_MODE_OFF && !tool_on()) {
             const int *codes = *(int **)(g_base + RVA_PTR_KEYS);
-            if (gradtool_placing()) {
+            if (decaltool_active()) {
+                /* Decals mode: a click inside a decal picks it and its handles are ours; presses on the game's own dots
+                   and on empty ground, and every other key, still go to the game. */
+                int hovered = *(int *)(g_base + RVA_HOVERED_WIDGET);
+                if (key == left && down && hovered < 0 && mouse_x() >= 21.25f * (win_h() / 64.0f)) {
+                    float x, z;
+                    world_at(mouse_x(), mouse_y(), &x, &z);
+                    if (decaltool_down(x, z, view_ft_now() / win_h(), (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0,
+                                       (GetAsyncKeyState(VK_MENU) & 0x8000) != 0)) {
+                        g_decal_press = 1;
+                        return 1;
+                    }
+                } else if (key != left && down && key < 0x1000 &&
+                           decaltool_key(key, (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0)) {
+                    return 1; /* [ ], Ctrl+Z; d stays the game's copy (the raw 0x10xx copy still goes to the game, as for every key) */
+                }
+            } else if (gradtool_placing()) {
                 /* Placing a saved gradient: a click on the map puts its A there, Esc cancels. Pan, zoom and the rest
                    still go to the game, so the spot can be found first. */
                 int hovered = *(int *)(g_base + RVA_HOVERED_WIDGET);
@@ -827,6 +1026,18 @@ static int key_detour(int key, int down)
                 }
             } else if (down && key < 0x1000 && gradtool_key(key)) {
                 return 1; /* Del in Gradient Placement or Edit */
+            } else if (down && curvetool_range_key(key)) {
+                return 1; /* Esc lets go of a range of profile points */
+            } else if (key == left && down && *(int *)(g_base + RVA_HOVERED_WIDGET) < 0 &&
+                       mouse_x() >= 21.25f * (win_h() / 64.0f)) {
+                /* The game's Gradient Edit: Shift+click marks a range of points on its graph and a click on the range
+                   drags it. Only those clicks are ours; every other one goes to the game as before. */
+                curve_view gv;
+                if (current_view(&gv) &&
+                    curvetool_graph_down(&gv, mouse_x(), mouse_y(), (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0)) {
+                    g_graph_press = 1;
+                    return 1;
+                }
             }
         }
         int own = curvetool_mode() != CURVE_MODE_OFF;
@@ -834,7 +1045,7 @@ static int key_detour(int key, int down)
         if (key == left && !down && g_map_press) {
             g_map_press = 0;
             if (own && current_view(&v))
-                curvetool_mouse(&v, CURVE_UP, mouse_x(), mouse_y(), 0, 0);
+                curvetool_mouse(&v, CURVE_UP, mouse_x(), mouse_y(), 0, 0, 0);
             else
                 queue(EV_UP, key, 0);
             return 1;
@@ -853,7 +1064,7 @@ static int key_detour(int key, int down)
                     g_map_press = 1;
                     if (own && current_view(&v))
                         curvetool_mouse(&v, CURVE_DOWN, mouse_x(), mouse_y(), (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0,
-                                        (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
+                                        (GetAsyncKeyState(VK_MENU) & 0x8000) != 0, (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
                     else
                         queue(EV_DOWN, key, 1);
                 }
@@ -911,6 +1122,7 @@ void ingame_start(uintptr_t base)
 
 void ingame_stop(void)
 {
+    wheel_unhook();
     brush_patch(0);
     radial_patch(0);
     hook_remove(&g_key);

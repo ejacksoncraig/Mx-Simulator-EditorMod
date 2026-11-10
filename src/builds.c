@@ -1,5 +1,5 @@
-/* The address tables, one per mx.exe build (docs/builds.md). A new build: run
-   tools/port_build.py, check what it couldn't match by disassembly, and add a table. */
+/* The address tables, one per mx.exe build (docs/builds.md). A new build: find its
+   addresses by disassembly, matched against 1.0's, and add a table. */
 #include "builds.h"
 
 #include <string.h>
@@ -62,8 +62,9 @@ static const mx_build g_builds[] = {
         .rva_game_free = 0xbce0,
         .rva_radial_height = 0x5fa10,
         .rva_profile_height = 0x5f820,
+        .rva_radius = 0x177828, .rva_focus = 0x177868, .rva_granularity = 0x1776e8, /* the sliders' values, by their labels */
     },
-    { /* ported 2026-11-05 with tools/port_build.py */
+    { /* ported 2026-11-05 by matching against 1.0 */
         "snapshot 2026-05-14 (1684)", "b1cc5dc3905bf2e319e919fd7359652bab8e8b4e2069bbece2c24241d710f6cf",
         .rva_editor_terrain = 0x50fd228,
         .rva_editor_mode = 0x50fd260,
@@ -120,8 +121,22 @@ static const mx_build g_builds[] = {
         .rva_game_free = 0xe0310,
         .rva_radial_height = 0xe54c0,
         .rva_profile_height = 0xe52d0,
+        .rva_radius = 0x21bc08, .rva_focus = 0x21bc48, .rva_granularity = 0x21bac8, /* the sliders' values, by their labels */
+        /* Decals: found by disassembly of this build (game/decals.md), not yet ported to 1.0 or 1681. */
+        .rva_decal_replace = 0xcf70,
+        .rva_decal_shift = 0xc020,
+        .rva_decal_insert = 0xcd50,
+        .rva_decal_remove = 0xcca0,
+        .rva_selected_decal = 0x50fd2a4,
+        .rva_decal_group = 0x50fd2a8,
+        .decal_sig = {
+            {0x41, 0x55, 0x57, 0x56, 0x48, 0x83, 0xec, 0x30, 0x48, 0x89, 0xd6, 0x45, 0x89, 0xc5, 0x45, 0x85},
+            {0x56, 0x53, 0x48, 0x89, 0xce, 0x41, 0x89, 0xd2, 0x48, 0x8d, 0x99, 0xc0, 0x00, 0x00, 0x00, 0x45},
+            {0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x28, 0x49, 0x89, 0xcc, 0x49, 0x89},
+            {0x56, 0x53, 0x48, 0x83, 0xec, 0x28, 0x48, 0x89, 0xce, 0x89, 0xd3, 0x85, 0xd2, 0x78, 0x29, 0x44},
+        },
     },
-    { /* ported 2026-11-05 with tools/port_build.py */
+    { /* ported 2026-11-05 by matching against 1.0 */
         "snapshot 2025-03-26 (1681)", "0ce56445ac388f777717a2ecc83d1c8cf8239b7ca663299ae9d7b0370c961376",
         .rva_editor_terrain = 0x4db168,
         .rva_editor_mode = 0x4db1a0,
@@ -178,6 +193,7 @@ static const mx_build g_builds[] = {
         .rva_game_free = 0x6e080,
         .rva_radial_height = 0x64640,
         .rva_profile_height = 0x64450,
+        .rva_radius = 0x176568, .rva_focus = 0x1765a8, .rva_granularity = 0x176428, /* the sliders' values, by their labels */
     },
 };
 

@@ -1,4 +1,10 @@
-/* App <-> mod protocol. Mirrored by mxtools/core/game_link.py; tests/test_game_link.py checks they match.
+/* ======================================================================================================
+   APP LINK: this whole file is only for MX Simulator Tools, the external track-building app (a separate
+   program, not part of this repo). It lets the app read and write the editor's terrain over a local pipe.
+   The in-game tools work without it. Search the code for "APP LINK" to find every piece of it.
+   ====================================================================================================== */
+/* App <-> mod protocol. The app's side is mxtools/core/game_link.py in MX Simulator Tools' own repo; keep the two
+   in step.
 
    Frame: u32 payload_length, u32 type, then payload (little-endian).
    HELLO        app -> mod: empty.             mod -> app: JSON (see game.c, mod_hello_json).
@@ -30,7 +36,7 @@
 #pragma once
 
 #define MXMOD_PROTOCOL_VERSION 1
-#define MXMOD_VERSION "0.25.3"
+#define MXMOD_VERSION "0.35.2"
 #define MXMOD_PIPE_NAME L"\\\\.\\pipe\\mxmod"
 
 #define MXMOD_MSG_HELLO 1

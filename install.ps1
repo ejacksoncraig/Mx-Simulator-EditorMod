@@ -19,12 +19,22 @@ if (Get-Process mx -ErrorAction SilentlyContinue) { throw "Close MX Simulator fi
 $target = Join-Path $Game "opengl32.dll"
 $chained = Join-Path $Game "opengl32_mxs.dll"
 
+if (-not (Test-OurDll $Dll)) { throw "$Dll isn't the editor mod (no mxmod_version export)." }
+
+$renamed = $false
 if ((Test-Path $target) -and -not (Test-OurDll $target)) {
     if (Test-Path $chained) { throw "Both $target and $chained exist and neither is the editor mod. Sort them out by hand." }
     Rename-Item $target "opengl32_mxs.dll"
+    $renamed = $true
     Write-Host "Kept the existing opengl32.dll (MXS Shaders?) as opengl32_mxs.dll; the mod loads it."
 }
 
-Copy-Item $Dll $target -Force
+try {
+    Copy-Item $Dll $target -Force
+} catch {
+    # A failed install leaves the folder as it was.
+    if ($renamed) { Rename-Item $chained "opengl32.dll" }
+    throw
+}
 Write-Host "Installed $target"
 Write-Host "Offline only: start the editor with  mx.exe --editor. Log: $env:LOCALAPPDATA\MX Simulator\mxtools\log.txt"

@@ -1,3 +1,8 @@
+/* ======================================================================================================
+   APP LINK: this whole file is only for MX Simulator Tools, the external track-building app (a separate
+   program, not part of this repo). It lets the app read and write the editor's terrain over a local pipe.
+   The in-game tools work without it. Search the code for "APP LINK" to find every piece of it.
+   ====================================================================================================== */
 /* Named pipe server \\.\pipe\mxmod: one local client (the app) at a time. Runs on its own thread and never
    touches game memory: every request goes to the game thread through mod_request(). */
 #include "mod.h"

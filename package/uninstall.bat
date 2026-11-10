@@ -26,7 +26,7 @@ if "%GAME:~-1%"==" " set "GAME=%GAME:~0,-1%"
 if "%GAME:~-1%"=="\" set "GAME=%GAME:~0,-1%"
 if not exist "%GAME%\mx.exe" goto nogame
 :found
-echo Game folder: %GAME%
+echo Game folder: "%GAME%"
 tasklist /fi "imagename eq mx.exe" | find /i "mx.exe" >nul
 if not errorlevel 1 goto running
 
@@ -34,6 +34,7 @@ if not exist "%GAME%\opengl32.dll" goto restore
 findstr /m "mxmod_version" "%GAME%\opengl32.dll" >nul
 if errorlevel 1 goto notours
 del "%GAME%\opengl32.dll"
+if exist "%GAME%\opengl32.dll" goto delfailed
 echo Removed the editor mod.
 
 :restore
@@ -46,7 +47,10 @@ pause
 exit /b 0
 
 :elevate
-powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath '%~f0'"
+rem The script's path goes through an environment variable, never into the command text, so no folder name can
+rem break or change the command.
+set "MXMOD_SELF=%~f0"
+powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath $env:MXMOD_SELF"
 exit /b 0
 :fromreg
 rem The folder of the uninstaller the game's installer registered under key %1, if there is one.
@@ -64,6 +68,10 @@ pause
 exit /b 1
 :nogame
 echo mx.exe wasn't found there. Check the folder and run this again.
+pause
+exit /b 1
+:delfailed
+echo Couldn't remove the mod's opengl32.dll from "%GAME%". Nothing else was changed.
 pause
 exit /b 1
 :notours

@@ -1,10 +1,10 @@
 # The app's gradient tools inside the game's editor (spec and task list)
 
-Goal (Jackson, 2026-11-05): the app's new gradient tools (Curve Path, Curve Profile, and later others) show up and work
+Goal (2026-11-05): the app's new gradient tools (Curve Path, Curve Profile, and later others) show up and work
 inside `mx.exe --editor` as if they shipped with the game: buttons in the game's own panel style, the curve and its
 handles drawn on the game's map, worked with the game's mouse and keys. You never touch the app window.
 
-Read first: `docs/design.md` (rules, protocol, M0-M4), `docs/game/editor-gradients-ui.md` (the game's panel look
+Read first: `docs/design.md` (rules, protocol, M0-M4), `game/editor-gradients-ui.md` (the game's panel look
 and widget behaviour), MX Simulator Tools' `docs/track-editor-app.md` ("Curved gradients"). Every address below is from mx.exe build
 54676784...a392, written as the full VA (`0x14xxxxxxx`); subtract `0x140000000` for the RVA the mod uses.
 
@@ -52,7 +52,7 @@ x = (mouseX - W/2) / H * viewFt + centreX        (W/2 and H/2 are integer divisi
 z = (mouseY - H/2) / H * viewFt + centreZ
 ```
 The inverse gives screen px for a world point. The marker unit is `u = max(viewFt * 0.01, 1)` ft and pick radius
-`u / 2` (docs/game/editor-gradients-ui.md section 1).
+`u / 2` (game/editor-gradients-ui.md section 1).
 
 ### Input: one handler for keys and mouse buttons
 `0x1400645d0(uint key, int down)`, returns 1 when handled. The main loop (0x14016e460) calls it for every key and mouse
@@ -113,7 +113,7 @@ quads face away and aren't drawn; M5's first build drew nothing but the button u
 The panel's layout (0x140061bc4..0x140061d8f): unit `p = H / 64` px (`local scale = (H/64, -H/64)`); backdrop quad from
 x 0 to 21 p (plus a 21..21.25 fade strip), full height; first row at x = 0.5 p; each row moves down 1.5 p
 (`e190(pos, scale, 0, -1.5)`); widgets are 20 p wide; labels/values split at the middle (10 p). Constants at
-`0x1402253a0..cc`: 20, 64, ..., 0.5, -64, 21, 21.25, -1.5. Colours: `0x140177070..15f` (table in docs/game/editor-gradients-ui.md
+`0x1402253a0..cc`: 20, 64, ..., 0.5, -64, 21, 21.25, -1.5. Colours: `0x140177070..15f` (table in game/editor-gradients-ui.md
 section 9).
 
 ### Hook points
@@ -185,7 +185,7 @@ hook only reads that copy.
   (or a new `MXMOD_NOHOOKS=1`) starts with no hooks at all.
   **Passed 2026-11-05 on ModTest (mod 0.5.0, `src/ingame.c`).**
   - Both prologues matched before patching (`sub rsp` 0x558 and 0x118) and both hooks went in at start-up.
-  - Jackson saw the right-hand strip and the MX Tools button in the game's style, lit on hover; clicks on it (counted
+  - In the game: the right-hand strip and the MX Tools button in the game's style, lit on hover; clicks on it (counted
     in `hello` as `toolPresses`) painted nothing; the red cross sat on the map centre and stayed on that ground while
     panning and zooming; mode keys, painting and Backspace worked as before.
   - Diagnostics (`hello.ingame`): the overlay ran on all 1220 editor frames; 2560 x 1440 window = 113.8 units wide;
@@ -199,7 +199,7 @@ hook only reads that copy.
   colour (draw a `line` from `get_gradients`), and it sits exactly on the game's own line at every zoom.
   **Passed 2026-11-05 on ModTest (mod 0.6.0, `src/scene.c`).**
   - `game_link scene-line 0 --seconds 180` drew all 93 gradients' A to B lines and a cross at each end (279 items).
-    Jackson: every magenta line sat on the game's own line and the crosses on its A and B handles, zoomed in and out
+    In the game, every magenta line sat on the game's own line and the crosses on its A and B handles, zoomed in and out
     and panned. They went when the CLI disconnected (log 14:28:19; the scene read back empty).
   - Points are placed the way the game's map camera places them, not with the mouse formula: in panel units
     `ux = (x - cx) * 64 / viewFt + 32 * e8 / ec`, `uy = -(z - cz) * 64 / viewFt - 32` (no integer W/2).
@@ -213,7 +213,7 @@ hook only reads that copy.
   clicks on the map print world x, z that match the game's own cursor readout (the `x y z` row at the bottom of the
   left panel); the map doesn't paint; the pan button, zoom keys, `s` and Backspace still work; clicking a game mode
   button turns the tool off.
-  **Passed 2026-11-05 on ModTest (mod 0.7.0).** `game_link events --seconds 300` turned on a dummy tool. Jackson: map
+  **Passed 2026-11-05 on ModTest (mod 0.7.0).** `game_link events --seconds 300` turned on a dummy tool. Map
   clicks put a cross under the mouse and didn't paint; pan, arrows, zoom keys and Backspace still worked; `f` and `u` did
   nothing in the game; `7` turned the tool off and the game's tools worked again. What arrived:
   - The left mouse button is key **8192** (0x2000), down and up at the same world point (e.g. 1538.13, 499.91).
@@ -228,18 +228,18 @@ hook only reads that copy.
 - **M8a, Curve Path in the game, driven by the app. Works (2026-11-05, mod 0.7.1).** Play In Game in the Track Editor's
   curve panel: `GamePlay` in `core/game_link.py` holds the one pipe, polls events on a thread and sends the newest scene;
   the page follows the game's view (scale `H / viewFt`) and feeds game events into the canvas handlers (now named
-  `mapMouseDown / Move / Up / KeyDown`). Jackson drew and edited a curve with the game's mouse. Gotchas: the scene has to
+  `mapMouseDown / Move / Up / KeyDown`). A curve was drawn and edited with the game's mouse. Gotchas: the scene has to
   be sent from the poll loop, since `requestAnimationFrame` doesn't run while the app's window is behind the game's; and
   Chromium's background timer throttling is turned off in `__main__.py`. The mouse wheel didn't zoom with the tool on:
   codes 0x100c..0x100e now always go to the game (0.7.1, not yet checked in game).
-  **Decision (Jackson, 2026-11-05): the tools should work inside the game without the app.** The app keeps its own curve
+  **Decision (2026-11-05): the tools should work inside the game without the app.** The app keeps its own curve
   tool; the in-game work moves to a standalone tool in the mod, section 8. M8a stays as it is but isn't built on.
 - ~~**M8, Curve Path in the game.**~~ ~~**M9, the panel.**~~ Superseded by section 8 (the tool runs inside the mod, no
   app). M8a above is the app-driven version that was built first.
 
 ## 8. Standalone: the curve tool inside the mod, no app (decided 2026-11-05)
 
-Jackson wants the tools to live in the game's editor and not need the app running. The app keeps its own curve tool;
+The tools are meant to live in the game's editor and not need the app running. The app keeps its own curve tool;
 the mod gets its own copy, ported to C. Everything M5-M7 built stays: the hooks, the drawing helpers, the input
 handling, and M2/M3's height writes (called directly instead of over the pipe). The pipe stays for tests and the app.
 
@@ -294,12 +294,19 @@ Results:
   heights the same, extend / cut / stretch identical, the written file reads back the same in Python).
   Unsaved edits here win over a file the app rewrites meanwhile (the status says so).
 - **The mouse wheel:** the editor only zooms with `=` and `-` (0x1400652d0: only 0x3d and 0x2d change the zoom); turning
-  the wheel codes into those keys didn't zoom either, so the wheel just goes to the game. Dropped (Jackson).
+  the wheel codes into those keys didn't zoom either, so the wheel just goes to the game. Dropped.
+  **Done another way in 0.35.1:** `=` / `-` only add or take 0.5 off the Zoom slider's value (1.0 0x655c8, 1684
+  0xeb668; `-` clamps at its min, -3), so the mod subclasses the game's window (found with EnumThreadWindows on the game
+  thread) for WM_MOUSEWHEEL alone and writes the slider itself (label-checked, `game_slider_set`), 0.25 a notch, moving
+  the view centre so the ground under the cursor stays put. Only while the editor drew within the last 2 frames and the
+  mouse is on the map (not either panel); the message is then swallowed, otherwise passed on. Not checked in the game
+  yet. Also seen there: `]` / `[` (0x5d / 0x5b) are the game's Strength +/- keys in every mode (slider at 0x1778a0 on
+  1.0); the decal tool takes them in Decals mode only.
 - S3 (profile graph) skipped for now.
 - **S4 passed 2026-11-05 (mod 0.10.0, `curvemath.c`):** Live Preview (no undo step, ground put back when it stops or the
   tool goes off) and Apply To Ground (one undo step), with M3's rules ported from `CurveInGame` (the ground under the
   curve saved once, every write checked against what was left, a changed ground stops the preview without writing).
-  Heights go through `game_write_heights` in `game.c`, the same sequence SET_HEIGHTS uses. Jackson applied the S-bend:
+  Heights go through `game_write_heights` in `game.c`, the same sequence SET_HEIGHTS uses. Applying the S-bend:
   the game's ground matched Python's `paint_curve` of the saved curve on the files to 9.5e-7 ft over the whole map
   (24,203 cells), and one Backspace put it back exactly (0 cells differ). Settings fixed until S5: inner 10, outer 20,
   strength 1, Paint. Checked natively first (`bake_test.c`): Paint matches to 5e-15 ft; Add with bank to 3e-8, except
@@ -309,7 +316,7 @@ Results:
   (readouts, "sides will fold" when Outer is wider than the tightest turn), Path Change (Extend / Stretch), Inner, Outer
   (inner can't pass outer), Bank, Strength (sliders, stepped like the game's: `min + round((max - min) * t / step) *
   step` along the bar the slider draws), Bake As (Paint / Add), SubMode (none / raise / lower), and Live re-previews when
-  any of them changes. Jackson: everything works and looks like the game's.
+  any of them changes. Checked in the game: everything works and looks like the game's.
   Widgets, verified by disassembly: choice `0x14001ed10(ch, on, pos, scale, 20, 0, 0.5)`, struct {label, options,
   count @+0x10, selected @+0x14, rect @+0x18} (40 bytes); slider `0x14001f130(sl, on, pos, scale, 20, 0, 0.5)`, struct
   {label, double value, step, min, max, rect @+0x28, bar x0, x1 @+0x38} (64 bytes); readout `0x14001e830(text,
@@ -321,27 +328,27 @@ Results:
   Type, Flatten (and `f`), Set From Terrain from the game's own heights (any preview taken off first), Slope and Height
   readouts, the yellow dots and the mouse ring along the curve. Set From Terrain checked natively against
   `points_from_ground`: the same points and types, heights within 5e-12 ft. New scene kinds for it: segments, quad, ring.
-- **Gradient Length for the game's own gradients (mod 0.13.0, built 2026-11-05, Jackson to check):** in Gradient
+- **Gradient Length for the game's own gradients (mod 0.13.0, built 2026-11-05):** in Gradient
   Placement our panel shows **Gradient Length: Locked / Extend / Stretch** (Locked = the game as it is). With Extend or
   Stretch, dragging B of a shaped gradient puts B under the mouse and refits its profile to the new length every frame
   (before the game draws and again at SwapBuffers), from the profile as it was when the drag began, with `profile_fit`
   (`extended_points` / `stretched_points`). Untouched gradients are left to the game. The drag is recognised from
   mode 9, drag state `0x1417e2608 == 2` (B) and `0x1417e25e4 == 1` (button held on the map). Extend can need one more
   profile point than the gradient has room for; then the status line says so and Stretch still works.
-- **Gradient Length checked by Jackson 2026-11-05: works.**
-- **Profile sections (mod 0.14.0, `library.c`, built 2026-11-05, Jackson to check):** a library of profile pieces (a 3 ft
+- **Gradient Length checked in the game 2026-11-05: works.**
+- **Profile sections (mod 0.14.0, `library.c`, built 2026-11-05):** a library of profile pieces (a 3 ft
   jump, a table top...) kept across tracks in `%LOCALAPPDATA%\mxtools-mod\profile-sections.json`. In the game's Gradient
   Edit (mode 10, the selected gradient) and in our Curve Profile: Mark Start and Mark End on picked points, Save Section
   (kept relative to its first point, named from its shape: "3.0 ft high, 24 ft long"), Section (choose), Paste At Point
   (its first point on the picked point at that point's height; the points it covers replaced; the profile's length
   unchanged), Delete Section. A game gradient only takes what fits in its room (16 or 32 points); curves hold 128.
-- **Sections, mod 0.15.0 (Jackson's asks after trying 0.14.0):** the Section row is a dropdown (the chosen name across the
+- **Sections, mod 0.15.0 (changes asked for after trying 0.14.0):** the Section row is a dropdown (the chosen name across the
   whole row; a click lists every saved section under it, a click on one picks it), and **Rename Section** types a name
   in the game: while typing, every key is the mod's (characters only, not the raw 0x10xx copies; Enter keeps it, Esc
   cancels, Backspace deletes), and typing ends whenever its row isn't on screen, so the keyboard always comes back.
   New automatic names are shorter ("2.7 ft high, 34 ft") so they fit a row. The panel holds 32 rows, so a very long
   list gets cut off.
-- **Brush shapes (mod 0.16.0, built 2026-11-05, Jackson to check):** in the game's brush modes (0..8) our panel shows
+- **Brush shapes (mod 0.16.0, built 2026-11-05):** in the game's brush modes (0..8) our panel shows
   Brush Shape (Circle / Square / Oval), Brush Angle and Oval Width. The game's brush is `0x14005fb10(x0, z0, x1, z1,
   outer, inner, strength)` (from the drag step at 0x140066fa0), one call per stroke step: it walks the cells around the
   segment and, for every mode but Smooth (mode 2 has its own loop at 0x140060cd4), all three cases (beyond the end, the
@@ -353,6 +360,14 @@ Results:
   round reach, since the game only visits cells within outer of the stroke); Oval: one axis divided by Oval Width. The
   stroke's capsule still uses the nearest point by the game's measure, so a fast drag sweeps the shape a little unevenly.
   The mod draws the shape's outline at the mouse once a stroke has told it the radii; the game still draws its circle.
+- **Triangle brush (mod 0.32.0, proportions 0.33.0):** Brush Shape also has Triangle, with Triangle Width (base over
+  height) and Triangle Lean (the tip along the base; -1 or 1 is a right angle, and the two are mirror images, which no
+  rotation can swap). The distance is the largest of three edge measures (`tri_shape` in `ingame.c`), each normal / its
+  distance from the centre. The centre is the centroid and the farthest corner is on the outer radius, so the shape stays
+  inside the brush's round reach at any angle; an equilateral covers about 41% of the circle's area. Brush Angle runs to
+  360 because a lopsided triangle differs after a half turn. It is the one shape that isn't the same at the negated
+  offset, so it relies on the loop's offset being cell minus stroke in all three cases. Checked by disassembly on all three builds (in 1.0, 0x14006001d and 0x1400606e0);
+  check it again when porting a new build.
 - **No more point limits (mod 0.18.0):** the game's realloc is `0x14000bbc0(old, size)` (the CRT's realloc plus the
   game's own allocation tracking for `MX_CHECK_ALLOC`), and the game grows a full gradient vector by doubling its capacity
   and reallocating capacity * stride (0x14005d0c0). `grow_vector` in `game.c` does the same, so paste, Extend and
@@ -376,11 +391,11 @@ Results:
   again and `KNOWN_SHA256` updated.
 - **Not done:** undo of curve edits in the game (the app has it); typed widths (sliders instead); a shaped Smooth.
 
-## 9. Gradient tools and the panel's look (mod 0.25.0, built 2026-11-05, Jackson to check)
+## 9. Gradient tools and the panel's look (mod 0.25.0, built 2026-11-05)
 
 Requested by track builders. `src/gradtool.c` owns these rows; they show while the game's own tools are in use.
 
-**The panel (decided by Jackson, 2026-11-05):** it doesn't have to copy the old editor screen; readable and easy to
+**The panel (decided 2026-11-05):** it doesn't have to copy the old editor screen; readable and easy to
 use comes first. It still draws with the game's widgets, but rows now come in groups under a gold header (CURVES, BRUSH
 SHAPE, GRADIENT 12 OF 93, SAVED GRADIENTS, RADIAL SWEEP, PROFILE SECTIONS), with grey hint lines that say what to do
 next ("Click a gradient's line to pick it", "Click the map where A goes"). Both are `readout(text, text_rgba, box_rgba,
@@ -394,7 +409,7 @@ with a clear box. The panel holds 40 rows (1 + 40 x 1.5 = 61 of the window's 64 
   free (0x14000bce0: drops the pointer from its allocation tracking, then the CRT free; 286 callers), slide the rest
   down, zero the slot past the end, count - 1, selection cleared. Refused while a button is held or the track is
   locked. The ground the gradient shaped stays (heights don't know gradients).
-- **A gradient must stay selected while any are left** (found by Jackson in 0.25.0, fixed in 0.25.1): Placement's
+- **A gradient must stay selected while any are left** (found in 0.25.0, fixed in 0.25.1): Placement's
   click starts from the selected gradient and returns at once when it is -1 (0x1400eb079 on 1684: `js` to the
   handler's end, before the loop that picks the gradient nearest the mouse at 0x1400ebd2f), and Gradient Edit's does
   the same (0x1400eae2b). The game never sets -1 itself while gradients exist. So a delete selects the gradient that
@@ -425,7 +440,22 @@ whole instructions) jump to `radial_height` in `ingame.c`, which reads the gradi
 0x14005f820. The bytes are checked first (opcodes, and the first read must be the selected gradient) and put back at
 180 centred and when the DLL unloads.
 
-**Profile sections, reworded (0.25.1, Jackson: "really hard to understand for someone who doesn't know what it does"):**
+**Berm Preview (0.34.0, `src/bermpreview.c`):** a button in Placement and Edit that shows what Radial Add would do with
+the picked gradient, painted on the real ground with no undo step, using the Sweep rows (shown while it's on). Each cell:
+`ground + weight * h(s)`, with `s` from `sweep_s` and `weight` from `sweep_weight`: 1 across the wedge out to the
+profile's end, then the brush's smoothstep over Outer minus Inner. It ignores Strength (see the brush section of
+`game/track-editor-gradients.md`) and the game's SubMode, whose address isn't in the build tables. Leaving Placement and
+Edit ends it, so a stroke can't land on it. It updates when the mouse is let go, because `game_write_heights` refuses
+while the game's drag holds it. It puts the track's min and max height back when it comes off; curve Live and the stamp
+don't yet.
+
+**Previews and saving (0.34.0):** the game's save (0x140018d90) has one caller, 0x14005bcb0, which is called only from
+the `s` key (0x140065c31) and the panel button handler (0x14005e14d), and both run inside the key handler we hook. So
+`key_detour` takes every preview off before the game sees `s`, `p`, a number key, or any key or click with a game widget
+hovered; that also covers Set From Terrain. If one can't come off (a held mouse button, the edit lock), the key is
+swallowed, because the track file must never get a preview. Addresses are build 1.0's.
+
+**Profile sections, reworded (0.25.1, feedback: "really hard to understand for someone who doesn't know what it does"):**
 two groups. SAVE A PROFILE SECTION says what a section is, then one numbered step at a time ("1. Click where it
 starts on the graph", "2. Click where it ends", "3. Save it"), with buttons that say what they do ("Use Point As
 Section Start", "Start: point 3 (change)", Clear Start And End). The marks are drawn on the graph: a green ring at the
@@ -433,7 +463,7 @@ start, an orange one at the end, the piece between in green. YOUR SECTIONS shows
 ("3.0 ft up, 24 ft  v", "^" when open, "> " before the chosen one in the list) with "Click the name to pick another",
 then Paste At Picked Point, Rename, Delete.
 
-Checks for Jackson (ModTest):
+Checks to run in the game (ModTest):
 1. Placement: pick a gradient, Delete (and Del): it goes, the ground stays; Undo Delete brings it back with its
    profile; `s`, reload: `edinfo` has the list as shown.
 2. Export, then Place On Map on another spot and Put Back; both look like the original in Gradient Edit.
@@ -457,3 +487,138 @@ handlers on our structs, or copying their rules) gets answered in S1 for buttons
    windows).
 6. **The tripwire.** Done in 0.21.0: the `sendto` import entry is swapped before any hook goes in, and every packet
    is dropped (this PC included, since 0.23.1) with a one-time warning (details in docs/design.md rule 2).
+
+## 10. Duplicate Curve and moving a range of profile points (mod 0.27.0, built 2026-11-06)
+
+- **Duplicate Curve** (Curve Path, a curve selected): a copy 10 ft to the side, the way the game's Copy Gradient offsets
+  its copy (`10 * (dz, -dx) / |AB|`, with AB the curve's first segment), selected so it can be dragged into place.
+- **A range of points, moved as one**, on the game's Gradient Edit graph and on our Curve Profile graph: Shift+click a
+  point to start the range, Shift+click another to end it, and every point from one to the other is in it (gold rings
+  and the profile between them in gold). A plain click on a point in the range drags them all
+  (`profile_group_drag`, `profile.c`); a plain click anywhere else, Esc or Clear Selection lets go of it, and so does any
+  added or deleted point. The held point goes under the mouse; the rest move by the same amount. The range stops just
+  short (1/64 ft) of its unselected neighbours instead of passing them, and with an end of the profile in it, it only
+  moves up and down.
+- On the game's graph only those clicks are taken (`curvetool_graph_down` from the key handler, with our tool off and
+  the game in mode 10); every other click goes to the game. The drag rewrites the gradient's profile each frame with
+  `game_set_profile`, the same point count, so nothing is reallocated.
+- Not done: the game's own Granularity isn't read (its address isn't known), so on a game gradient the range moves
+  without snapping; on a curve our Granularity applies. Not checked in the game yet: whether Shift+click does anything
+  of the game's own in Gradient Edit.
+
+## 11. Brush size in feet and presets (mod 0.28.0, built 2026-11-06)
+
+- The curve tool's Inner slider now tops out at 50 and Outer at 100 (finer steps for the small sizes used most).
+- **The game brush's size in feet.** In the game's brush modes our BRUSH group has Outer (ft) and Inner (ft). They set
+  the game's own Radius slider (screen px: outer ft = Radius * viewFt / screenH) and Focus (inner / outer) every frame,
+  so the size on the ground stays put while zooming (`brush_size_frame`). Moving the game's own Radius or Focus (by
+  more than its step's rounding) lets go of the hold. Addresses and how they were found: `docs/builds.md`.
+  **0.29.1:** the slider's 1..128 px range broke the hold a couple of zoom steps in (a 50 ft brush needs ~150 px at
+  zoom 2.5). The hold now writes Radius past 128 (`game_slider_set_unclamped`), kept to the feet the game's own
+  1..128 px reach at some zoom (Zoom slider -3..8, step 0.125). Safe because (1684 disassembly): the brush stroke
+  (0x1400ed97b), cursor ring and `Actual Radius` readout (0x1400e7a83) all read Radius fresh as
+  `Radius * mapFt / (screenH * 2^zoom)`, the brush gets outer/inner as feet arguments, the slider draw (0x1400f9170)
+  clamps its fill fraction to 0..1 and never writes the value, and only the click handler for widget 0x15
+  (0x1400e3981) touches the struct, which also lets go of the hold.
+- **Presets** (`presets.c`, `%LOCALAPPDATA%\MX Simulator\mxtools\presets.json`), two lists:
+  - CURVE PRESETS (with a curve selected): Inner, Outer, Bank, Strength, Bake As, SubMode.
+  - BRUSH PRESETS (the game's brush modes): outer and inner ft, Brush Shape, Angle, Oval Width, Sweep and From B.
+  Save As New Preset names it from its values; Rename Preset types a name (the same typing as Rename Section); a
+  click on a preset in the dropdown uses it. A field missing from the file leaves that setting as it is.
+- The range drag on a game gradient now snaps with the game's own Granularity slider.
+- **Moving a whole curve (0.29.0):** in Curve Path, Shift+drag on any part of a curve (its line, a point or a handle)
+  moves every point and handle by the mouse's offset from the press (`DRAG_MOVE`, from a copy of the points taken at the
+  press, so it doesn't drift). A curve that isn't selected is picked by the same press. Not while drawing a new curve
+  (clicks add points then). The profile keeps its length, since a move doesn't change the path; Live Preview follows.
+
+## 12. Rut stamps (mod 0.30.0, built 2026-11-06; shelved in 0.34.1)
+
+**Shelved (0.34.1):** not finished, so the Rut Stamp button is hidden and `curvetool_set_mode` refuses the stamp mode
+unless the DLL is built with `MXMOD_STAMP=1` (`curvetool.h`). `stamptool.c` is still compiled so it keeps building.
+
+`src/stamptool.c`, the **Rut Stamp** button under Curve Profile (`CURVE_MODE_STAMP`; the curve tool routes the panel,
+mouse, keys, frame and scene to it, row kinds from `STAMPTOOL_ROW` = 200, checked before `GRADTOOL_ROW`).
+
+- **The stamp** is a height image added to the ground under it, so it fits any terrain. Grey is a share of Depth:
+  Flat Is = Mid Grey: `2g - 1`; White: `g - 1`; Black: `g`. Times alpha (transparent = no change). Image x runs along
+  Length, image y across Width; at Angle 0 it's as it looks in the image editor (x right, z down the screen).
+- **Images** come from `%LOCALAPPDATA%\MX Simulator\mxtools\stamps` (PNG, TIFF, BMP; up to 4096x4096), read with WIC.
+  ole32 (CoInitializeEx / CoCreateInstance) and shell32 (ShellExecuteW for Open Stamps Folder) are loaded with
+  LoadLibrary when first used, so the DLL's imports didn't change. A 16-bit grey PNG is read as is; 48/64-bit RGB(A) is
+  converted to 64bppRGBA (same, linear, family); anything else to 32bppRGBA. Never 8-bit to a 16-bit WIC format: WIC
+  treats those as linear and would gamma-bend the greys. Grey = RGB average. Picking a file stamp keeps Length and
+  sets Width from the image's proportions. "Built-in Rut" (a trough with a low berm each side) needs no file.
+- **Painting** (`paint`): each cell's centre (x = col * cell, z = row * cell) in the stamp's own axes, bilinear, k x k
+  samples a cell (k = image px per cell, 1..6) so a big image isn't read as noise. End Fade and Side Fade (ft) are a
+  smoothstep from each edge in.
+- **Preview** is the curve tool's Live, on floats (`pv_*`): the ground under it is kept, each change is painted from
+  that copy, the last preview's cells are put back. Retried only when a setting changes (also after a failed write).
+  If the ground under it changed (the game's Backspace undo), it starts again from the ground as it is now.
+  Apply (or Enter) = one undo snapshot, then the stamp is no longer placed (the next click places a new copy).
+- **Save:** `s` takes the preview off first (`stamptool_before_save`, from the key detour before the game sees the key)
+  and waits 30 frames before showing it again, so the track file never gets a preview in it. Since 0.34.0 the same
+  check covers every preview (stamp, curve Live, Berm Preview) and the game's Save button, not just `s`; see Berm Preview.
+- **Mouse and keys:** click places it (and starts a move drag); a press on it (10 px slack) moves it; Ctrl+drag turns
+  it (whole degrees); `[` `]` turn 5 degrees; Esc / Del lift it (ground put back); Enter applies.
+- Checked outside the game (a test harness including stamptool.c): 16-bit PNG greys exact, 8-bit greys not
+  gamma-shifted (200 -> 51400), alpha read, missing file refused, built-in paints -0.85 / +0.12 ft at Depth 1 on 1 ft
+  cells. Not yet checked in the game.
+
+## 14. Decal editing in Decals mode (mod 0.35.0, built 2026-11-09, 1684 only)
+
+`src/decaltool.c` (the tool, the maths), the decal section of `src/game.c` (the game's calls, index fix-ups, checks),
+rows from `DECALTOOL_ROW` = 300 (checked before the stamp's 200). Everything about the game's side is in
+`game/decals.md`; the axes are its section 1 (width = size * f5 along (cos, -sin), height = size along (sin, cos)).
+
+- **Picking:** a press inside a decal (not on a game widget, not on the selection's own centre or rotate dot) picks the
+  smallest one whose turned rectangle holds the mouse and writes it to the game's selection; it never reaches the game,
+  which would stamp a decal there. Presses on empty ground and on the game's dots still go to the game (stamping, its
+  move with the group, its rotate). The decal a click would pick is outlined faintly.
+- **Handles on the selection** (gold outline, screen-px sized): corners scale about the centre (f5 kept; Shift: whole
+  feet of height); side handles stretch with the opposite side fixed (Alt: about the centre; Shift: whole feet), hidden
+  when that side is under 40 px; the ring past the top edge turns it (relative to where it was grabbed; Shift: 15
+  degree steps). Each mouse move calls 0xcf70 with a record built from the decal as it was at the press, with sin and
+  cos computed from the new rot. One undo step per drag.
+- **Keys** (only while a decal is picked; mode 15; our tool off): `d` is the game's own copy (0.35.0 had a flush copy
+  on the right in its place; removed in 0.35.2 at Jackson's request, the game's is the one wanted); `[` `]` 10% smaller
+  or bigger; `{` `}`
+  (Shift) 1%, but only while the game's group is empty, since with a group they are the game's spread and pull;
+  Ctrl+Z (char 26, or `z` with Ctrl held) undoes. Buttons: Bigger, Smaller, Delete Decal, Undo. (The game's own copies
+  aren't on our undo; its copy keeps working with ours, since our undo finds a decal by its bytes, not its index.)
+- **Undo:** our own, 64 steps per track: the 72-byte record before and after, the index and the op. An entry applies
+  only while the decal it left is still there, found by its bytes (at its index first, so the game's own inserts and
+  deletes moving it are fine); one the game changed since is dropped with a message.
+- **The game's rotate drag** writes the previous move's sin and cos; each frame in mode 15 the selection's sin and cos
+  are put right with 0xcf70 when they're off by more than 1e-5 (the one write allowed while the game holds the button).
+- **Refused** while the edit lock (terrain+0x49574) is set or the game holds the mouse button. Saving is the game's own
+  Save; the panel says it rewrites the decals file whole and drops lines it can't read.
+- On 1.0 and 1681 the decal addresses are 0, so the panel says "Not ported to this game build yet" and nothing is taken.
+- **Checked outside the game** (a test including decaltool.c with the game's calls stood in by an array, 40 checks):
+  corners against the game's quad table (0x3060) at f5 = 2, width = size * f5, both stretches keep the opposite side's
+  corners, Alt keeps the centre, a corner at 1.5x gives size 1.5x with f5 kept, the turn handle reads rot by the game's
+  own rotate rule, Shift snaps to 15 degrees, D's copy's left corners sit on the original's right corners, undo of
+  scale / copy / delete, smallest-area picking, `}` left to the game with a group, a stale undo dropped untouched.
+- **Not checked in the game yet** (the brief's steps, on ModTest): 1. which image edge is v = 0 (a lopsided picture at
+  f5 = 2); 2. the outline sits on the decal at f5 = 1 and 2; 3. turning and corner scaling re-bake the ground smoothly
+  (per-move cost) and match the app for the same numbers; 4. side stretch; 5. D and undo; also that Ctrl+Z arrives as
+  char 26 or `z`, and that the game draws nothing odd with its selection set by us. Step 6 (pipe messages) not done.
+
+## 13. Set From Terrain that keeps sharp edges (mod 0.31.0, built 2026-11-08)
+
+The game's method rounds off lips: one sample per cell, then six passes that drop points by comparing each to a straight
+line through its neighbours (tolerance up to 1/4 ft), never to the ground, so the error adds up. Profiles on test
+ground with 5-6 ft jumps came out up to 6.2 ft wrong. `profile_trace_ground` (`profile.c`) replaces the port of that method on the curve
+tool's button, and **Set From Terrain (Sharp)** (TRACE THE GROUND, in the game's Gradient Edit) runs it along the selected
+gradient's line. The game's own button is untouched. **Terrain Fit (ft)**, default 0.05, is shared by both.
+
+- **Why Lines:** a Curve is always tangent to its neighbour at a shared point (the slope rules in
+  `game/track-editor-gradients.md`), so only a point with a Line on both sides can hold a kink.
+- **Steps:** read the ground every cell/4; find edges (slope one cell each side changes by 0.25 or more, peak within a
+  cell); give each a Line half a cell down each face, held in place; collapse straight runs (the game's first step);
+  then remove a point only if the rebuilt curve stays within Terrain Fit of every ground sample it can change.
+- **Too many points for a profile:** loosen up to about 0.5 ft, then let go of the edges and loosen further. The status
+  line always gives the real worst distance.
+- Worst can pass Terrain Fit near an edge: held points aren't removed or moved, and a grid peak can fall between samples.
+- Checked outside the game (old vs new driver, synthetic ground, 2 ft cells, Fit 0.05): worst error 0.6-6.2 ft (0.6-3.5 ft within 4 ft of a lip or edge)
+  became 0.05-0.25 ft, points 1.2-2x (34-71 vs 19-51). Flat ground, short paths, off-map paths and pure noise all
+  give valid profiles; a zero-length path is refused. Not yet checked in the game.

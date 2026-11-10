@@ -1,4 +1,9 @@
-/* What the app asks the mod to draw over the editor (SET_SCENE, docs/ingame-tools.md section 4).
+/* ======================================================================================================
+   APP LINK: this whole file is only for MX Simulator Tools, the external track-building app (a separate
+   program, not part of this repo). It lets the app read and write the editor's terrain over a local pipe.
+   The in-game tools work without it. Search the code for "APP LINK" to find every piece of it.
+   ====================================================================================================== */
+/* What the app asks the mod to draw over the editor (SET_SCENE, protocol.h).
 
    The JSON is parsed on the game thread into one of two buffers and the draw hook reads the other, so a frame never
    sees half a scene. Anything unknown is skipped, so the app can add fields before the mod knows them. */

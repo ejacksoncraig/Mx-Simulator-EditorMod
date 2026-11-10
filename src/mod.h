@@ -1,4 +1,4 @@
-/* Shared declarations for the MX Simulator editor mod. See docs/design.md. */
+/* Shared declarations for the MX Simulator editor mod. See DEVELOPERS.md. */
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -33,10 +33,24 @@ typedef struct {
 int game_heights(game_map *out); /* 0 when no track is loaded */
 void game_status(const char *text); /* the editor's status line; text must outlive it (a static string) */
 int game_editor_mode(void);         /* 0..15, 9 = Gradient Placement */
+/* The game's own sliders, checked by their label first. Radius is in screen px: outer ft = Radius * viewFt / screenH;
+   inner = Focus * outer. 0 / an error if this build's aren't known. */
+enum { GAME_SLIDER_RADIUS, GAME_SLIDER_FOCUS, GAME_SLIDER_GRANULARITY, GAME_SLIDER_ZOOM };
+int game_slider_get(int which, double *value, double *step, double *min, double *max);
+const char *game_slider_set(int which, double value); /* clamped to the slider's range; NULL on success */
+/* Radius past its slider's 1..128 px, clamped to lo..hi instead: the caller keeps it to a size in feet the game's own
+   brush reaches at some zoom (the brush code reads it unclamped; only a click on the slider clamps it again). */
+const char *game_slider_set_unclamped(int which, double value, double lo, double hi);
+int ingame_view(double *view_ft, int *screen_h);      /* ingame.c: the map's height in ft and the window's in px */
 int game_track(char *out, size_t cap); /* the open track's folder name (under %LOCALAPPDATA%\MX Simulator), 0 if none */
 enum { GRADIENT_LENGTH_LOCKED, GRADIENT_LENGTH_EXTEND, GRADIENT_LENGTH_STRETCH };
 void game_gradient_length_frame(double mouse_x, double mouse_z, int resize); /* game thread, before the draw */
 const char *game_write_heights(int col0, int row0, int cols, int rows, const float *src, int first, int final);
+int game_mouse_held(void); /* a mouse button is down in the editor, so game_write_heights would refuse */
+/* The track's lowest and highest height, which a write only ever widens. Save scales terrain.png to them, so a preview
+   that widened them puts them back when it comes off. */
+int game_height_range(float *lo, float *hi);
+void game_set_height_range(float lo, float hi);
 
 /* ingame.c: the hooks for tools inside the editor (M5+). Start on the game thread once the mod is enabled. */
 void ingame_start(uintptr_t base);

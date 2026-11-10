@@ -1,4 +1,4 @@
-; Brush shapes (docs/editor-mod-ingame-tools.md, "Brush shapes"). While a shape other than Circle is chosen, the game's
+; Brush shapes. While a shape other than Circle is chosen, the game's
 ; brush loop jumps here from 0x140060035, with the offset from a cell to the nearest point of the stroke in xmm2 (x) and
 ; xmm0 (z). This does the integer work the patch covered, asks mx_brush_distance for the distance, and goes back to
 ; 0x14006005a with it in xmm0, every other register as the game left it (xmm2 squared, as the original leaves it).

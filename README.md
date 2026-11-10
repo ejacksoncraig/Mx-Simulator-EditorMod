@@ -1,7 +1,7 @@
 # MX Simulator Tools editor mod (offline only)
 
 An `opengl32.dll` that MX Simulator loads from its own folder. Inside `mx.exe --editor` it adds tools to the game's
-track editor: curved gradients, gradient length, profile sections, brush shapes, delete / export / place gradients and
+track editor: curved gradients, gradient length, profile sections, brush shapes, delete / export / place gradients,
 radial sweep. It also lets MX Simulator Tools (Jackson Craig's track-building app, a separate repo) read and write the
 editor's terrain live over a local pipe. Its version shows faintly at the top of its panel.
 
@@ -31,7 +31,6 @@ as separate DLLs rather than merging them.
    `icacls "C:\Program Files (x86)\MX Simulator" /grant "${env:USERNAME}:(OI)(CI)M"`
 3. A scratch track: copy `%LOCALAPPDATA%\MX Simulator\BetterBlank` (or any track) to `ModTest`. Never test the mod on
    a track you care about.
-4. For the tests and tools: `python -m venv .venv` then `.venv\Scripts\python.exe -m pip install -r requirements-dev.txt`.
 
 ## Build, install, run
 
@@ -46,28 +45,38 @@ Press TAB until the editor screen shows. The tools are in the panel at the top r
 Set `MXMOD_NOHOOKS=1` before starting to leave the game's code untouched, or `MXMOD_READONLY=1` to turn every write
 into a log line.
 
-Tests: `.venv\Scripts\python.exe -m pytest tests -q`. Players' zip: `powershell -ExecutionPolicy Bypass -File
-package.ps1` makes `dist\mxtools-editor-mod-<version>.zip` (the DLL, install.bat, uninstall.bat,
-[package/README.txt](package/README.txt)).
-
 ## What it touches
 
 - Never mx.exe's file. Inside `--editor` it patches the editor's draw and key handler in memory (`src/ingame.c`),
   checking the original bytes first and putting them back on unload.
 - It reads the editor's heightmap and gradients and writes them the way the game's brush does: heap data only, then
   the game's redraw flag and undo snapshot.
-- It listens on `\\.\pipe\mxmod` for local connections only.
+- APP LINK: it listens on `\\.\pipe\mxmod` for local connections only, for MX Simulator Tools (see below).
 - Its files: `%LOCALAPPDATA%\MX Simulator\mxtools\` (`log.txt`, `profile-sections.json`, `gradients\`), and
   `mx-tools-curves.json` beside each track.
 
 ## Where to read next
 
-- [docs/design.md](docs/design.md): the rules, what the mod touches in memory, the pipe protocol, the tripwire.
-- [docs/ingame-tools.md](docs/ingame-tools.md): the hooks, the game's view, input, drawing and widget functions, and
-  how each tool works.
-- [docs/builds.md](docs/builds.md): the game builds the mod knows and how to port a new one (`tools/port_build.py`).
-- [docs/game/](docs/game/): how the game's own editor works and its gradient and brush math.
-- [CLAUDE.md](CLAUDE.md): the same map, for working on the mod with Claude Code.
+- [DEVELOPERS.md](DEVELOPERS.md): a one-page brief on how it works and how another mod can run alongside it.
+- [docs/builds.md](docs/builds.md): the game builds the mod knows and how their addresses were found.
+- [.claude/skills/mx-editor-mod/](.claude/skills/mx-editor-mod/SKILL.md): for whoever maintains the mod. A Claude Code
+  skill (loaded automatically in this repo) with the game's internals, the in-game tools' findings, and
+  `port_build.py` for porting to a new game build. It isn't part of the DLL, so a code review can skip it.
+
+## APP LINK: the code that's only for MX Simulator Tools
+
+MX Simulator Tools is a separate track-building app (its own program and repo, not in here). This mod lets it read
+and write the editor's terrain live over a local pipe. That code isn't needed by the in-game tools, and every piece of
+it is marked `APP LINK` in the source, so a search finds all of it:
+
+- `src/pipe.c`: the pipe server thread (local connections only).
+- `src/protocol.h`: the message format, kept in step with the app's client.
+- `src/scene.c`: shapes the app asks the mod to draw over the map.
+- `src/game.c`: the request handlers (`handle_*`, `service_request`, `mod_request`) and the `pipe_start()` call.
+- `src/ingame.c`: the mouse and key event queue the app reads (`queue`, `ingame_events_json`).
+
+Code comments that name `core/*.py` or `web/*.js` also mean the app's files: the curve tool was ported from the app
+line for line, and the two give the same results.
 
 ## Files
 
@@ -75,11 +84,15 @@ package.ps1` makes `dist\mxtools-editor-mod-<version>.zip` (the DLL, install.bat
 - `src/tripwire.c`: the online tripwire, armed from DllMain in every session.
 - `src/game.c`: the known build, reading the editor state and writing heights on the game thread.
 - `src/ingame.c`: the inline hooks (prologue check, trampolines) and what they draw and catch.
-- `src/builds.c`: one address table per game build.
+- `src/builds.c`: one address table per game build. `src/brush_stub.asm`: the brush-shape patch.
 - `src/curvetool.c`, `src/gradtool.c`, `src/pen.c`, `src/curvemath.c`, `src/profile.c`, `src/library.c`,
-  `src/sweep.c`, `src/curvefile.c`: the in-game tools. `src/scene.c`: shapes the app asks the mod to draw.
-- `src/pipe.c`: the pipe server thread. `src/log.c`: the log. `src/protocol.h`: the pipe protocol, shared with the
-  app's client.
-- `tools/gen_exports.py` + `tools/exports.txt`: generate the export table and jump stubs (`src/*_gen*`,
-  `opengl32.def`, `stubs_*`). `python tools/gen_exports.py --from-system` re-reads System32's opengl32.dll.
-- `build.bat` (MSVC) and `build.sh` (mingw-w64 compile check). `tests/`: pytest, with native drivers.
+  `src/stamptool.c` (rut stamps, shelved), `src/decaltool.c` (decal editing in Decals mode), `src/bermpreview.c`, `src/sweep.c`, `src/curvefile.c`, `src/json.c`: the in-game tools. `src/log.c`: the log.
+- Generated, don't review line by line: `src/exports_gen.h`, `src/opengl32.def`, `src/stubs_masm.asm` are one
+  "jump to the real opengl32 function" stub per GL export, written by `tools/gen_exports.py` from `tools/exports.txt`
+  (`--from-system` re-reads System32's opengl32.dll).
+- `build.bat` (MSVC), `install.ps1`, `uninstall.ps1` (for development).
+- `package.ps1`: builds and makes the players' zip, `dist\mxtools-editor-mod-<version>.zip` (the DLL and the two
+  .bat files), and prints its SHA-256 to publish with the release. Players extract it and double-click `install.bat`.
+- `package/install.bat`, `package/uninstall.bat`: for players. They use the DLL beside them, or `..\build\` from a clone. Install only
+  copies a DLL that is this mod, keeps another opengl32.dll as `opengl32_mxs.dll` (and puts it back if the copy
+  fails); uninstall only deletes the DLL if it is this mod. Both refuse while the game is running.

@@ -4,7 +4,7 @@
 when one changes, change the other. Paths like `core/` and `tests/` here are that repo's.*
 
 > How the editor draws gradients on screen (colors, handle sizes, the Edit profile graph) and its panel features
-> (New/Copy Gradient, Set From Terrain, Flatten, Granularity, drag rules): see [docs/game/editor-gradients-ui.md](editor-gradients-ui.md).
+> (New/Copy Gradient, Set From Terrain, Flatten, Granularity, drag rules): see [game/editor-gradients-ui.md](editor-gradients-ui.md).
 
 Reverse engineered from mx.exe (SHA-256 54676784...dada392) with Ghidra. The function addresses are for that build; the
 full RE notes live in the "Mx Sim" Claude Project (`claude/mx-track-editor.md`).
@@ -50,11 +50,16 @@ add_point <type> <s> <h>
 - Footprint = capsule around the mouse drag segment (previous position -> current). `d` = distance to that segment.
 - Weight: `d <= inner` -> 1. Between inner and outer: `u = (d - inner)/(outer - inner)`, `w = 1 - 3u^2 + 2u^3` (smoothstep). Beyond outer -> 0.
 - Paint: `delta = h(s) - current`. Add: `delta = h(s)`. `new = current + clamp(strength, 0, 1) * w * delta`, then Raise Only / Lower Only.
+- **Gradient Add doesn't pile up along a stroke** (disassembly of mode 8 on all three builds, 2026-11-09; in 1.0,
+  0x140060170 on). The brush keeps a copy of the ground, `start`. A cell moves only if `|w * h(s)| > |current - start|`,
+  by `clamp(strength, 0, 1) * w * h(s)`, and never past `start + w * h(s)`. Raise Only then takes the larger of that and
+  `start`, Lower Only the smaller. So Strength sets how fast a cell gets there, and the limit is `start + w * h(s)` at the
+  largest `w` it saw. Not traced: when `start` is refreshed; undo snapshots are the likely point.
 
 ## Curved gradients (this app, built)
 The game only curves the height profile; a gradient that follows a turn in plan view is the app's (and the editor
 mod's) addition. How the tool works: "Curved gradients" in MX Simulator Tools' `docs/track-editor-app.md` (and this repo's
-`docs/ingame-tools.md` section 8 for the copy in the game). The path is a Bezier pen path
+`ingame-tools.md` section 8 for the copy in the game). The path is a Bezier pen path
 (`core/curved.py`, `web/pen-path.js`). Per cell: `s` = arc length to the nearest point on the path, `d` = sideways
 distance, the same profile and smoothstep falloff as above, plus optional banking `bank * signed d`.
 
@@ -64,7 +69,7 @@ Design notes that still hold:
 - Ends need an explicit cutoff; the game's straight gradient has none because the brush limits it.
 - Close the in-game editor before saving: it holds its own copy and overwrites on its save (or use the editor mod).
 
-## Where the code is (in MX Simulator Tools; the mod's ports are listed in `docs/ingame-tools.md` section 8)
+## Where the code is (in MX Simulator Tools; the mod's ports are listed in `ingame-tools.md` section 8)
 - Height math (profile, s/d per cell, falloff, applying to the grid): `mxtools/core/gradient.py` and
   `mxtools/core/curved.py`, numpy, no UI, tested in `tests/test_gradient.py`, `test_gradient_brush.py`, `test_curved.py`.
 - The page only edits points and the profile and shows previews: the full-res grid stays in Python and the page gets

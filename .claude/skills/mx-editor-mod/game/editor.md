@@ -9,7 +9,7 @@ Main source: mxsimulator.com/editing.html (jlv, 2007, "To be continued...").
 ## Starting it
 - `mx.exe --editor`, optionally `--track <folder>`; then press TAB until the editor screen shows [editing.html].
 - Erosion is a separate command-line option: `--erode <x>` (multiplies each roost's `dig`).
-- New tracks: start from a blank track folder in `%LOCALAPPDATA%\MX Simulator\` (BetterBlank is Jackson's test track).
+- New tracks: start from a blank track folder in `%LOCALAPPDATA%\MX Simulator\` (BetterBlank is a good blank to copy for testing).
 
 ## Screen
 Left column = mode list (click to pick, or number keys) [verified mode numbers]:
@@ -21,7 +21,7 @@ to lower it, right-click to raise it). The HUD also shows the mouse's world `x y
 
 **Focus = the solid part of the brush (observed):** the HUD reads `Focus 0.50 ... Actual Radius: 25.26 (12.63)`, so
 inner radius = Focus x radius. Inside the inner radius the brush is at full weight, then smoothstep to zero at the
-outer radius (docs/game/track-editor-gradients.md "Brush"). Focus 0 = soft all the way; Focus 1 = hard edge.
+outer radius (game/track-editor-gradients.md "Brush"). Focus 0 = soft all the way; Focus 1 = hard edge.
 
 ## Keys [editing.html; the keys exist in the input handler 0x1400645d0, actions as documented]
 | key | action |
@@ -31,7 +31,8 @@ outer radius (docs/game/track-editor-gradients.md "Brush"). Focus 0 = soft all t
 | Backspace | undo (8 full heightmap copies, verified) |
 | Del | delete (Billboards and Statues modes) |
 | TAB | back to game mode |
-| `d` | duplicate (Statues mode) |
+| `d` | duplicate (Statues mode): a copy of the selected statue at the mouse, added at the end of the list (observed, 1684 0x1400ea690) |
+| `i` | interpolate (Statues mode, verified on 1684 0x1400ea690): with statue k selected, moves every statue after it except the last onto the straight line from k to the **last** statue in the list, evenly spaced, on the ground (y = 0). Rotation is left alone. All statues from k to the end must be the same object, else "Bad match for interpolate!"; needs at least one statue between them |
 | `f` | flatten the gradient profile (reset to two points at height 0) |
 | `p` | export a `.pov` file (track.pov) |
 | `s` | save |

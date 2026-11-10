@@ -1,6 +1,6 @@
 """Find the editor mod's mx.exe addresses in another game build.
 
-    python tools/port_build.py "<known mx.exe>" "<other mx.exe>"
+    python .claude/skills/mx-editor-mod/port_build.py "<known mx.exe>" "<other mx.exe>"
 
 Code addresses: the instructions at the known address, with branch targets and RIP-relative displacements masked
 (those move between builds; everything else, stack sizes and struct offsets included, must match), searched for in
