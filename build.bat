@@ -23,7 +23,7 @@ if not exist build mkdir build
 ml64 /nologo /c /Fobuild\stubs.obj src\stubs_masm.asm || exit /b 1
 ml64 /nologo /c /Fobuild\brush_stub.obj src\brush_stub.asm || exit /b 1
 cl /nologo /O2 /W4 /WX- /Zi /MT /LD /Fobuild\ /Fdbuild\ /Febuild\opengl32.dll ^
-   src\proxy.c src\game.c src\pipe.c src\log.c src\ingame.c src\scene.c src\json.c src\curvefile.c src\curvetool.c src\gradtool.c src\bermpreview.c src\sweep.c src\pen.c src\curvemath.c src\profile.c src\library.c src\presets.c src\stamptool.c src\decaltool.c src\tripwire.c src\builds.c build\stubs.obj build\brush_stub.obj ^
+   src\proxy.c src\game.c src\pipe.c src\log.c src\ingame.c src\scene.c src\json.c src\curvefile.c src\curvetool.c src\gradtool.c src\bermpreview.c src\sweep.c src\pen.c src\curvemath.c src\profile.c src\library.c src\presets.c src\stamptool.c src\decaltool.c src\statuetool.c src\tripwire.c src\builds.c build\stubs.obj build\brush_stub.obj ^
    /link /DEF:src\opengl32.def /PDB:build\opengl32.pdb bcrypt.lib kernel32.lib user32.lib || exit /b 1
 
 echo Built %~dp0build\opengl32.dll

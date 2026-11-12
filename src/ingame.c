@@ -375,6 +375,7 @@ static void overlay_draw(void)
     if (curvetool_mode() == CURVE_MODE_OFF) {
         gradtool_scene(&g_own, mouse_wx, mouse_wz);
         decaltool_scene(&g_own, mouse_wx, mouse_wz, view_ft / h);
+        statuetool_scene(&g_own, mouse_wx, mouse_wz, view_ft / h);
     }
     float unit_px = h / 64.0f, wide = units_wide();
     int *batch = *(int **)(g_base + RVA_PTR_BATCH_FLAG);
@@ -638,6 +639,7 @@ void ingame_frame(void)
     curvetool_frame();
     gradtool_frame();
     decaltool_frame();
+    statuetool_frame();
     gradient_length_now();
     brush_frame();
     int px = mouse_x(), py = mouse_y();
@@ -647,6 +649,10 @@ void ingame_frame(void)
         float x, z;
         world_at(px, py, &x, &z);
         decaltool_move(x, z, (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0, (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
+    } else if ((px != g_last_px || py != g_last_py) && statuetool_dragging()) {
+        float x, z;
+        world_at(px, py, &x, &z);
+        statuetool_move(x, z);
     } else if ((px != g_last_px || py != g_last_py) && curvetool_dragging()) {
         curve_view v;
         if (current_view(&v))
@@ -868,7 +874,7 @@ static void brush_frame(void)
 static void brush_outline(scene *s, const curve_view *v, double mx, double mz)
 {
     int mode = game_editor_mode();
-    if (g_brush_shape == BRUSH_CIRCLE || mode < 0 || mode > 8 || mode == 2 || !(g_brush_outer > 0) || s->items + 2 > SCENE_MAX_ITEMS)
+    if (g_brush_shape == BRUSH_CIRCLE || mode < 0 || mode > 8 || (mode == 2 && !g_build->smooth_shaped) || !(g_brush_outer > 0) || s->items + 2 > SCENE_MAX_ITEMS)
         return;
     (void)v;
     static const float edge[4] = {1, 1, 1, 0.9f}, inside[4] = {1, 1, 1, 0.45f};
@@ -927,6 +933,7 @@ static int g_our_press;   /* the left button went down on our panel, so its rele
 static int g_place_press; /* the left button placed a saved gradient, so its release is ours too */
 static int g_graph_press; /* the left button selected or dragged a range on the game's Gradient Edit graph */
 static int g_decal_press; /* the left button picked a decal or grabbed one of its handles in Decals mode */
+static int g_statue_press; /* the left button (with Ctrl) toggled a statue in the group or started a box in Statues mode */
 
 static int key_detour(int key, int down)
 {
@@ -957,6 +964,12 @@ static int key_detour(int key, int down)
             /* The game never saw this press (a decal picked, or a handle dragged), so it doesn't see the release. */
             g_decal_press = 0;
             decaltool_up();
+            return 1;
+        }
+        if (key == left && !down && g_statue_press) {
+            /* The game never saw this press (the statue group's Ctrl+click, box or move), so it doesn't see the release. */
+            g_statue_press = 0;
+            statuetool_up();
             return 1;
         }
         if (key == left && !down && g_graph_press) {
@@ -1007,6 +1020,21 @@ static int key_detour(int key, int down)
                 } else if (key != left && down && key < 0x1000 &&
                            decaltool_key(key, (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0)) {
                     return 1; /* [ ], Ctrl+Z; d stays the game's copy (the raw 0x10xx copy still goes to the game, as for every key) */
+                }
+            } else if (statuetool_active()) {
+                /* Statues mode: Ctrl+click and Ctrl+drag make the statue group, and a drag on a group statue moves the
+                   group; other plain clicks and other keys are the game's. */
+                int hovered = *(int *)(g_base + RVA_HOVERED_WIDGET);
+                int ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+                if (key == left && down && hovered < 0 && mouse_x() >= 21.25f * (win_h() / 64.0f)) {
+                    float x, z;
+                    world_at(mouse_x(), mouse_y(), &x, &z);
+                    if (statuetool_down(x, z, ctrl)) {
+                        g_statue_press = 1;
+                        return 1;
+                    }
+                } else if (key != left && down && key < 0x1000 && statuetool_key(key, ctrl)) {
+                    return 1; /* Ctrl+Z after a group snap */
                 }
             } else if (gradtool_placing()) {
                 /* Placing a saved gradient: a click on the map puts its A there, Esc cancels. Pan, zoom and the rest

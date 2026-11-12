@@ -1408,7 +1408,7 @@ int curvetool_panel(panel_row *rows, int max)
             if (ROW(ROW_HEADER, ROWK_HINT, ""))
                 snprintf(r->text, sizeof r->text, "Lean 1 or -1: right angle");
         }
-        if (g_brush_shape != BRUSH_CIRCLE && game_mode == 2 && ROW(ROW_BRUSH_NOTE, ROWK_LABEL, ""))
+        if (g_brush_shape != BRUSH_CIRCLE && game_mode == 2 && !(g_build && g_build->smooth_shaped) && ROW(ROW_BRUSH_NOTE, ROWK_LABEL, ""))
             snprintf(r->text, sizeof r->text, "Smooth stays round");
     }
     /* For the game's own gradients (Delete, Export, Saved Gradients, Gradient Length) and the radial sweep: gradtool.c. */
@@ -1419,6 +1419,9 @@ int curvetool_panel(panel_row *rows, int max)
         room = (max < MAX_PANEL_ROWS ? max : MAX_PANEL_ROWS) - n;
         if (room > 0)
             n += decaltool_rows(rows + n, room, g_row_kind + n, g_row_arg + n); /* Decals mode (15) only */
+        room = (max < MAX_PANEL_ROWS ? max : MAX_PANEL_ROWS) - n;
+        if (room > 0)
+            n += statuetool_rows(rows + n, room, g_row_kind + n, g_row_arg + n); /* Statues mode (13) only */
         if (game_mode >= 0 && game_mode <= 8)
             n = preset_rows(PRESET_BRUSH, rows, n, max); /* size, shape and sweep, after the sweep's own rows */
     }
@@ -1593,7 +1596,7 @@ void curvetool_slide(int row, double value)
     if (row < 0 || row >= MAX_PANEL_ROWS)
         return;
     if (g_row_kind[row] >= DECALTOOL_ROW)
-        return; /* the decal rows have no sliders */
+        return; /* the decal and statue rows have no sliders */
     if (g_row_kind[row] >= STAMPTOOL_ROW) {
         stamptool_slide(g_row_kind[row], value);
         return;
@@ -1701,6 +1704,10 @@ void curvetool_press(int row)
 {
     if (row < 0 || row >= MAX_PANEL_ROWS)
         return;
+    if (g_row_kind[row] >= STATUETOOL_ROW) {
+        statuetool_press(g_row_kind[row], g_row_arg[row]);
+        return;
+    }
     if (g_row_kind[row] >= DECALTOOL_ROW) {
         decaltool_press(g_row_kind[row], g_row_arg[row]);
         return;

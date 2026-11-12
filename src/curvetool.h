@@ -245,6 +245,33 @@ int decaltool_dragging(void);
 int decaltool_key(int key, int ctrl);       /* 1 if it used the key */
 void decaltool_scene(scene *out, double mouse_x, double mouse_z, double ft_per_px);
 
+/* game.c: the editor's statues (game/statues.md). Game thread only. */
+typedef struct {
+    float x, y, z, rot; /* y is the world height the game's update wrote (ground + offset); only x, z, rot are set */
+} statue_pose;
+int game_statues_known(void);                   /* this build's statue list and update are ported and check out */
+int game_statue_count(void);                    /* 0 when unreadable */
+int game_statue_pose(int i, statue_pose *out);  /* 0 if there's no such statue */
+int game_statue_selected(void);                 /* Statues mode's selection, -1 for none */
+const char *game_statue_editable(void);         /* NULL when an edit may go ahead, else why not */
+/* Each NULL on success, else why. They call the game's statue update and set the track's modified flag. */
+const char *game_statue_set_pose(int i, const statue_pose *p); /* x, z and rot */
+const char *game_statue_snap(int i);            /* the game's Snap to Gradient, on the selected gradient */
+
+/* statuetool.c: a group of statues in Statues mode (13), picked with Ctrl+click and Ctrl+drag, moved by dragging one of
+   them or snapped to the selected gradient together, with our undo. Its rows go in our panel in mode 13; their kinds start at STATUETOOL_ROW. */
+#define STATUETOOL_ROW 400
+int statuetool_active(void);                /* mode 13, our tool off, this build's statue calls known */
+int statuetool_rows(panel_row *rows, int max, int *kinds, int *args);
+void statuetool_press(int kind, int arg);
+void statuetool_frame(void);
+int statuetool_down(double x, double z, int ctrl); /* 1 if the press is ours (Ctrl, or a plain press on a group statue) */
+void statuetool_move(double x, double z);
+void statuetool_up(void);
+int statuetool_dragging(void);
+int statuetool_key(int key, int ctrl);      /* 1 if it used the key */
+void statuetool_scene(scene *out, double mouse_x, double mouse_z, double ft_per_px);
+
 /* stamptool.c: rut stamps, a height image (made in Photoshop, say) placed on the ground like a layer: moved and turned
    with the mouse, previewed live, applied as one undo step. Its rows go in our panel while CURVE_MODE_STAMP is on;
    their kinds start at STAMPTOOL_ROW. Game thread only.

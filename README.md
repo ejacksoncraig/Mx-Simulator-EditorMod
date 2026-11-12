@@ -86,7 +86,7 @@ line for line, and the two give the same results.
 - `src/ingame.c`: the inline hooks (prologue check, trampolines) and what they draw and catch.
 - `src/builds.c`: one address table per game build. `src/brush_stub.asm`: the brush-shape patch.
 - `src/curvetool.c`, `src/gradtool.c`, `src/pen.c`, `src/curvemath.c`, `src/profile.c`, `src/library.c`,
-  `src/stamptool.c` (rut stamps, shelved), `src/decaltool.c` (decal editing in Decals mode), `src/bermpreview.c`, `src/sweep.c`, `src/curvefile.c`, `src/json.c`: the in-game tools. `src/log.c`: the log.
+  `src/stamptool.c` (rut stamps, shelved), `src/decaltool.c` (decal editing in Decals mode), `src/statuetool.c` (the statue group and its Snap to Gradient), `src/bermpreview.c`, `src/sweep.c`, `src/curvefile.c`, `src/json.c`: the in-game tools. `src/log.c`: the log.
 - Generated, don't review line by line: `src/exports_gen.h`, `src/opengl32.def`, `src/stubs_masm.asm` are one
   "jump to the real opengl32 function" stub per GL export, written by `tools/gen_exports.py` from `tools/exports.txt`
   (`--from-system` re-reads System32's opengl32.dll).

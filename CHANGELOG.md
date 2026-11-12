@@ -6,6 +6,25 @@ What each version of the MX Simulator Tools editor mod added or changed, newest 
 Versions before 0.36 were rebuilt from the notes in `.claude/skills/mx-editor-mod/ingame-tools.md` and from the text in
 each packaged DLL in `dist\` (0.26.0 onward), since git has only one commit. Nothing was found for 0.22, 0.24 or 0.26.
 
+## 0.36.2 (2026-11-12)
+- Statue group: drag any statue with a gold ring to move the whole group by the same offset. Each keeps its turn and
+  its height above the ground. One drag is one undo step (Undo Statue Move, or Ctrl+Z), sharing the 16 steps with
+  Snap. A plain click on a group statue no longer selects it in the game; on other statues it still does.
+  Not tried in the game yet.
+
+## 0.36.1 (2026-11-10)
+- On build 1684 the panel no longer says "Smooth stays round", and the shape's outline shows in Smooth too. On 1684,
+  Smooth goes through the same shaped distance as Raise and Lower. 1.0 and 1681 still smooth round.
+
+## 0.36.0 (2026-11-10)
+- A statue group in Statues mode (build 1684 only; 1.0 and 1681 show "Not ported to this game build yet"):
+  - Ctrl+click a statue to add it to the group or drop it. With an empty group, the game's selected statue joins too.
+  - Ctrl+drag on empty ground draws a box; the statues whose centres are inside join the group.
+  - Snap Group to Gradient runs the game's own Snap to Gradient on every statue in the group, against the selected
+    gradient. Undo Statue Snap (or Ctrl+Z) puts them back, 16 steps.
+  - Group statues show a gold ring. The group clears when a statue is added or deleted.
+  - Not tried in the game yet.
+
 ## 0.35.2 (2026-11-09)
 - Removed the mod's decal copy (D and "Copy To Its Right"). `d` is the game's own copy again.
 

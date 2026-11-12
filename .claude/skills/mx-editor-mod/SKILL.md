@@ -18,6 +18,7 @@ deeper knowledge: what was learned about mx.exe by disassembly, and the tool to 
 | The game's gradient panel, widgets, colours, gradient records | [game/editor-gradients-ui.md](game/editor-gradients-ui.md) |
 | The game's gradient and brush height math (tools must match it) | [game/track-editor-gradients.md](game/track-editor-gradients.md) |
 | Decals: data, paint order, edit calls, Decals mode (15) and its panel, the f5 axis | [game/decals.md](game/decals.md) |
+| Statues: the list, the record, the update call, Snap to Gradient's math, the mod's statue group | [game/statues.md](game/statues.md) |
 | The game's sliders (Radius, Focus, Granularity...) in a new build | `find_sliders.py`, and "The brush sliders" in `docs/builds.md` |
 
 ## Ground rules

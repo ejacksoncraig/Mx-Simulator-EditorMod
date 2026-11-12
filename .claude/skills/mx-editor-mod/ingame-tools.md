@@ -389,7 +389,14 @@ Results:
   "This version of MX Simulator isn't supported by the MX Simulator Tools editor mod yet...". `MXMOD_PRETEND_UNKNOWN=1`
   makes it act that way on the known build, to see it. A game update means a new build: the addresses have to be checked
   again and `KNOWN_SHA256` updated.
-- **Not done:** undo of curve edits in the game (the app has it); typed widths (sliders instead); a shaped Smooth.
+- **Build 1684's brush (0xe55c0, read 2026-11-10):** one loop for every mode. Smooth (mode 2) builds its blur kernel
+  at 0xe6784 and rejoins the main loop at 0xe58f1; its jump-table case (0xe5ff8, table 0x2318b0) averages the kernel and
+  lands on 0xe5b9e like Raise, so the patched distance (0xe5ae5) shapes Raise, Lower, Smooth and the rest. A second copy
+  of the loop (0xe61f0, own sqrt at 0xe62c4, table 0x2318d4 acting only for modes 2 and 3) is reached only when the
+  first column is negative, which the clamp at 0xe5713 rules out. `smooth_shaped` in builds.c marks the builds where
+  Smooth is shaped (1684), for the panel note and the outline.
+- **Not done:** undo of curve edits in the game (the app has it); typed widths (sliders instead); a shaped Smooth on
+  1.0 and 1681.
 
 ## 9. Gradient tools and the panel's look (mod 0.25.0, built 2026-11-05)
 

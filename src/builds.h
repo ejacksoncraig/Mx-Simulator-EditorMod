@@ -56,6 +56,8 @@ typedef struct {
     uint32_t rva_hovered_widget;
     uint32_t rva_brush_distance;
     uint32_t rva_brush_return;
+    int smooth_shaped;           /* 1: Smooth (mode 2) uses the patched brush distance too (1684: its kernel setup at 0xe6784
+                                    rejoins the main loop, 0xe5ff8 -> 0xe5b9e); 0: it has its own round loop (1.0, 1681) */
     uint32_t rva_game_malloc;    /* void *(size_t): the game's malloc, with its allocation tracking */
     uint32_t rva_game_free;      /* void (void *): its free */
     uint32_t rva_radial_height;  /* float (float x, float z): Gradient Radial's profile height at a cell */
@@ -72,6 +74,12 @@ typedef struct {
     uint32_t rva_selected_decal; /* int: Decals mode's selected decal, -1 none */
     uint32_t rva_decal_group;   /* {int *ptr; int cap, count, stride}: Decals mode's group of selected indices */
     unsigned char decal_sig[4][16]; /* replace, shift, insert, remove */
+    /* Statues (statue group, Statues mode 13; .claude/skills/mx-editor-mod/game/statues.md). 0 = not ported. The list is a
+       {ptr, cap, count, stride} vector at statue_list inside the window struct (*rva_ptr_window). */
+    uint32_t statue_list;          /* offset of the statue vector in the window struct */
+    uint32_t rva_selected_statue;  /* int: Statues mode's selected statue, -1 none */
+    uint32_t rva_statue_update;    /* void (statue *): y from the ground + offset, and the turn matrix, from x, z, rot */
+    unsigned char statue_sig[16];  /* rva_statue_update's first 16 bytes */
 } mx_build;
 
 extern const mx_build *g_build; /* the running one; NULL until game.c finds it */

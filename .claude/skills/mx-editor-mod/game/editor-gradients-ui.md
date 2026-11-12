@@ -223,7 +223,9 @@ Last rows of the panel: the cursor `x y z` (`%.2f %.2f %.2f`, y = ground height 
     gradient (select it in Placement or Edit first; the selection carries across modes). Does nothing while the
     edit lock is set. It is a panel button only: no key runs it.
   - Turning is skipped when rot >= 3.25. The yaw is wrapped to (-pi, pi] and keeps the upright flag (minus 4*pi).
-    y is set to 0 (on the ground). Exact facing sign is not checked in game **(unverified)**.
+    It writes 0 to +0x20 (the world y), but the update it calls next (0x41110) writes ground + the +0x28 offset there, so
+    the statue keeps its height above the ground. Exact facing sign is not checked in game **(unverified)**. The mod's
+    copy of this math, and the statue record, are in game/statues.md.
 
 ## Evidence
 | addr | role |

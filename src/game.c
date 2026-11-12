@@ -1251,6 +1251,197 @@ const char *game_decal_delete(int i)
     return NULL;
 }
 
+/* ── statues (game/statues.md; addresses in builds.c, 1684 only so far) ──
+   The list is a {ptr, cap, count, stride} vector in the window struct (*rva_ptr_window + statue_list). In a record:
+   +0x1c x, +0x20 world y (the update writes it: ground + offset), +0x24 z, +0x28 y offset above the ground, +0x2c rot,
+   +0x30.. its turn matrix. After writing x, z or rot the game calls the update (0x41110 on 1684) and sets the track's
+   modified flag (terrain+0x49570 = 7), so Save writes the statues file. */
+#define S_X 0x1cu
+#define S_Y 0x20u
+#define S_Z 0x24u
+#define S_ROT 0x2cu
+#define S_MIN_STRIDE 0x50 /* the update writes up to +0x4c */
+typedef void (*statue_update_fn)(void *statue);
+
+int game_statues_known(void)
+{
+    static int checked, known;
+    if (checked)
+        return known;
+    checked = 1;
+    if (!g_build || !g_build->statue_list || !g_build->rva_selected_statue || !g_build->rva_statue_update) {
+        mx_log("statues: this build's statue calls aren't ported, so the statue tools are off");
+        return 0;
+    }
+    const void *at = (const void *)(g_base + g_build->rva_statue_update);
+    if (!mx_readable(at, 16) || memcmp(at, g_build->statue_sig, 16) != 0) {
+        mx_log("statues: the code at rva %#x isn't the one checked, so the statue tools are off", g_build->rva_statue_update);
+        return 0;
+    }
+    known = 1;
+    mx_log("statues: the game's statue update checked out");
+    return 1;
+}
+
+/* The record of statue i, or 0. count gets the list's length (0 when unreadable). */
+static uintptr_t statue_at(int i, int *count)
+{
+    *count = 0;
+    uintptr_t w = 0;
+    if (!game_statues_known() || !read_ptr(g_base + g_build->rva_ptr_window, &w) || !w)
+        return 0;
+    const game_vector *v = (const game_vector *)(w + g_build->statue_list);
+    if (!mx_readable(v, sizeof *v))
+        return 0;
+    int n = v->count, cap = v->capacity, stride = v->stride;
+    if (n < 0 || n > cap || cap > (1 << 22) || (n && (stride < S_MIN_STRIDE || stride > 4096)))
+        return 0;
+    if (n && !mx_readable(v->data, (size_t)n * stride))
+        return 0;
+    *count = n;
+    return i >= 0 && i < n ? (uintptr_t)v->data + (size_t)i * stride : 0;
+}
+
+int game_statue_count(void)
+{
+    int n;
+    statue_at(-1, &n);
+    return n;
+}
+
+int game_statue_pose(int i, statue_pose *out)
+{
+    int n;
+    uintptr_t s = statue_at(i, &n);
+    if (!s)
+        return 0;
+    out->x = *(float *)(s + S_X), out->y = *(float *)(s + S_Y), out->z = *(float *)(s + S_Z), out->rot = *(float *)(s + S_ROT);
+    return 1;
+}
+
+int game_statue_selected(void)
+{
+    int sel = -1;
+    if (!game_statues_known() || !read_i32(g_base + g_build->rva_selected_statue, &sel))
+        return -1;
+    return sel >= 0 && sel < game_statue_count() ? sel : -1;
+}
+
+/* The game's Snap to Gradient checks the edit lock; a button held by the game is its drag. */
+const char *game_statue_editable(void)
+{
+    track_info t;
+    read_track(&t);
+    if (!game_statues_known())
+        return "This game version's statue edits aren't known to the mod.";
+    if (!t.present)
+        return "No track is open in the editor.";
+    if (t.locked)
+        return "The editor has this track locked for editing.";
+    if (t.mouse_down)
+        return "Let go of the mouse button first.";
+    return NULL;
+}
+
+/* x, z and rot written, then the game's update, then modified: what the game's own Snap to Gradient does. */
+static void statue_write(uintptr_t s, float x, float z, float rot)
+{
+    *(float *)(s + S_X) = x, *(float *)(s + S_Z) = z, *(float *)(s + S_ROT) = rot;
+    *(float *)(s + S_Y) = 0; /* the game's snap writes this too; the update puts ground + offset there */
+    ((statue_update_fn)(g_base + g_build->rva_statue_update))((void *)s);
+    uintptr_t t = 0;
+    if (read_ptr(g_base + RVA_EDITOR_TERRAIN, &t) && t)
+        *(int *)(t + T_FLAGS) = 7;
+}
+
+const char *game_statue_set_pose(int i, const statue_pose *p)
+{
+    const char *why = game_statue_editable();
+    if (why)
+        return why;
+    int n;
+    uintptr_t s = statue_at(i, &n);
+    if (!s)
+        return "That statue isn't there any more.";
+    if (!(p->x > -1e6f && p->x < 1e6f && p->z > -1e6f && p->z < 1e6f && p->rot > -1e3f && p->rot < 1e3f))
+        return "That statue's numbers aren't usable.";
+    if (g_readonly) {
+        mx_log("READONLY: would move statue %d", i);
+        return NULL;
+    }
+    statue_write(s, p->x, p->z, p->rot);
+    return NULL;
+}
+
+/* The game's yaw wrap after a snap (1684 0xe44b4..0xe451c): into (-pi, pi], minus 4 pi again when the statue was upright
+   (rot <= -2 pi). Floats and doubles exactly where the game has them. */
+static float snap_yaw(double angle, float old_rot)
+{
+    float a = (float)angle;
+    double w = (float)(((double)a + 3.141592653589793) * 0.15915494309189535);
+    float f = (float)(w - floor(w));
+    f *= 6.2831854820251465f;
+    float out = f - 3.1415927410125732f;
+    if (-6.283185307179586 >= (double)old_rot)
+        out = (float)((double)out - 12.566370614359172);
+    return out;
+}
+
+/* Snap to Gradient for statue i, the game's math (1684 0xe4291..0xe4b79) on the selected gradient. Let d = the statue's
+   distance from A and s* the profile s nearest d (0 to start with; ties keep the earlier). If the line A-B (extended) is
+   farther than |s* - d|, the statue slides along A->statue to s* from A, turned tangent to that ring; otherwise it goes
+   to its projection on the line, turned along it. Turning is skipped when rot >= 3.25. */
+const char *game_statue_snap(int i)
+{
+    const char *why = game_statue_editable();
+    if (why)
+        return why;
+    gradient_info gi;
+    if (!read_gradients(&gi))
+        return "The game's gradients couldn't be read.";
+    if (gi.selected < 0 || gi.selected >= gi.count)
+        return "Pick a gradient first (in Gradient Placement or Edit).";
+    const game_gradient *g = &gi.list[gi.selected];
+    int n;
+    uintptr_t s = statue_at(i, &n);
+    if (!s)
+        return "That statue isn't there any more.";
+    float sx = *(float *)(s + S_X), sz = *(float *)(s + S_Z), rot = *(float *)(s + S_ROT);
+    float ax = g->ax, az = g->az, dx = sx - ax, dz = sz - az;
+    float d = (float)sqrt((double)(dz * dz + dx * dx));
+    float best = 0, diff = 0 - d;
+    const float *pts = (const float *)g->points.data;
+    for (int k = 0; k < g->points.count; k++) {
+        float nd = pts[2 * k] - d;
+        if (fabsf(nd) < fabsf(diff))
+            diff = nd, best = pts[2 * k];
+    }
+    float ux = g->bx - ax, uz = g->bz - az;
+    float t = (dx * ux + dz * uz) / (ux * ux + uz * uz);
+    ux *= t, uz *= t;
+    float px = (ax - sx) + ux, pz = (az - sz) + uz;
+    float line = (float)sqrt((double)(pz * pz + px * px));
+    float nx, nz, nrot = rot;
+    if (fabsf(diff) > line) { /* onto the line; its direction flips with t's sign, as in the game */
+        if (rot < 3.25f)
+            nrot = snap_yaw(atan2((double)-ux, (double)-uz), rot);
+        nx = ux + ax, nz = uz + az;
+    } else { /* onto the ring */
+        if (rot < 3.25f)
+            nrot = snap_yaw(atan2((double)(az - sz), (double)dx), rot);
+        float k = best / d;
+        nx = k * dx + ax, nz = dz * k + az;
+    }
+    if (!(nx > -1e6f && nx < 1e6f && nz > -1e6f && nz < 1e6f && nrot > -1e3f && nrot < 1e3f))
+        return "A statue sits right on the gradient's A, so it has no direction to snap in.";
+    if (g_readonly) {
+        mx_log("READONLY: would snap statue %d to (%.3f, %.3f) rot %.4f", i, nx, nz, nrot);
+        return NULL;
+    }
+    statue_write(s, nx, nz, nrot);
+    return NULL;
+}
+
 /* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */
 /* SET_GRADIENT: i32 index, f32 ax, az, bx, bz, u32 n, n * (f32 s, h), n * u8 type. Rewrites one gradient in place;
    refused if the points don't fit in the room it already has (growing it needs the game's allocator, not done yet). */
