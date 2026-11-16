@@ -87,6 +87,7 @@ const section *library_get(int i);
 const char *library_add(const profile_point *p, int first, int last); /* NULL on success, else why */
 const char *library_delete(int i);
 const char *library_rename(int i, const char *name);
+const char *library_insert(int i, const section *s); /* put one back at index i (undo of a delete) */
 int section_paste(const profile_point *p, int n, int at, const section *s, int room, profile_point *out, const char **why);
 
 /* presets.c: named settings kept across tracks, for the curve tool and for the game's brush. A field set to NAN isn't
@@ -94,7 +95,7 @@ int section_paste(const profile_point *p, int n, int at, const section *s, int r
 enum { PRESET_CURVE, PRESET_BRUSH, PRESET_KINDS };
 #define PRESET_MAX 32
 #define PRESET_FIELDS 9
-enum { PC_INNER, PC_OUTER, PC_BANK, PC_STRENGTH, PC_ADD, PC_LIMIT };                 /* a curve preset's fields */
+enum { PC_INNER, PC_OUTER, PC_BANK, PC_STRENGTH, PC_ADD, PC_LIMIT, PC_SIDE };                 /* a curve preset's fields */
 enum { PB_OUTER, PB_INNER, PB_SHAPE, PB_ANGLE, PB_OVAL, PB_SWEEP, PB_SIDE, PB_TRI_WIDTH, PB_TRI_LEAN }; /* a brush preset's (radii in ft) */
 typedef struct {
     char name[48];
@@ -106,6 +107,7 @@ const preset *preset_get(int kind, int i);
 const char *preset_add(int kind, const double *v); /* named from its values; NULL on success, else why */
 const char *preset_rename(int kind, int i, const char *name);
 const char *preset_delete(int kind, int i);
+const char *preset_insert(int kind, int i, const preset *p); /* put one back at index i (undo of a delete) */
 
 /* gradtool.c: the radial sweep, for brush presets. */
 void gradtool_set_sweep(double degrees, int side);
@@ -125,13 +127,17 @@ int game_selected_gradient(void);                           /* -1 for none */
 int game_gradient_copy(int index, gradient_copy *out);      /* 0 if there's no such gradient */
 const char *game_gradient_delete(int index);                /* NULL on success, else why */
 const char *game_gradient_insert(int index, const gradient_copy *g); /* at index (clamped), then selected */
+const char *game_gradient_set_ends(int index, float ax, float az, float bx, float bz); /* NULL on success, else why */
+void game_gradient_select(int index);
 
 /* curvemath.c: core/curved.py paint_curve. grid is rows x cols doubles, its first cell at (at_row, at_col) of a
    width x width map; it has to cover curve_bounds. b = row0, row1, col0, col1. 0 when off the map or not covered. */
 enum { CURVE_LIMIT_NONE, CURVE_LIMIT_RAISE, CURVE_LIMIT_LOWER };
 int curve_bounds(const curve *c, double cell, double outer, int width, int b[4]);
 int curve_paint(double *grid, int at_row, int at_col, int rows, int cols, int width, double cell, const curve *c, double inner,
-                double outer, double strength, int add, int limit, double bank, int out_bounds[4]);
+                double outer, double strength, int add, int limit, double bank, int bake_side, int out_bounds[4]);
+enum { CURVE_SIDE_BOTH, CURVE_SIDE_LEFT, CURVE_SIDE_RIGHT }; /* curve_paint's bake_side */
+void curve_ease_plain(int on); /* the bake eases plain points on a near-straight run (curvemath.c eased); on by default */
 
 /* curvetool.c */
 typedef struct {
@@ -146,7 +152,8 @@ int curvetool_mode(void);
 void curvetool_set_mode(int mode);          /* CURVE_MODE_OFF when the game's own tool takes over */
 /* The panel's rows, drawn with the game's own widgets. A header names the group of rows under it; a hint is a line of
    help in plain words. Both are text only (nothing to click). */
-enum { ROWK_BUTTON, ROWK_CHOICE, ROWK_SLIDER, ROWK_LABEL, ROWK_HEADER, ROWK_HINT, ROWK_FAINT /* small print, right */ };
+enum { ROWK_BUTTON, ROWK_CHOICE, ROWK_SLIDER, ROWK_LABEL, ROWK_HEADER, ROWK_HINT, ROWK_FAINT /* small print, right */,
+       ROWK_TITLE /* the mod's name and version, top right: a bit larger, light gold */ };
 typedef struct {
     int kind;
     const char *label;
@@ -155,8 +162,22 @@ typedef struct {
     int count, selected;
     double value, min, max, step; /* a slider's */
     char text[64];              /* a label's */
+    int list;                   /* a scrolling list's row (PANEL_LIST_*), 0 = none: the wheel over it scrolls that list */
 } panel_row;
 int curvetool_panel(panel_row *rows, int max); /* top to bottom */
+/* Folding: a click on a group's header hides the rows under it (to the next header), so a long page fits the panel's
+   rows. Folded groups are kept in mxtools\panel-folds.txt. */
+int curvetool_header(int row);                 /* the row is a header a click folds or unfolds */
+/* Scrolling lists: a dropdown shows PANEL_LIST_SHOW items at a time, with a "more above" / "more below" row (kinds
+   PANEL_LIST_UP / PANEL_LIST_DOWN) when there are more; the wheel over the list scrolls it. */
+enum { PANEL_LIST_SECTIONS = 1, PANEL_LIST_CURVE_PRESETS, PANEL_LIST_BRUSH_PRESETS, PANEL_LIST_SAVED_GRADIENTS, PANEL_LISTS };
+#define PANEL_LIST_SHOW 8
+#define PANEL_LIST_UP 9000
+#define PANEL_LIST_DOWN 9001
+void panel_list_range(int list, int count, int *first, int *last); /* the items to show: first <= i < last */
+void panel_list_show(int list, int index);                         /* scroll so that item is on screen (on opening) */
+const char *panel_list_more(int list, int up, int hidden);         /* "^ 3 more above" / "v 3 more below" */
+int curvetool_wheel(int row, int notches);     /* the wheel over our panel's row: 1 if it scrolled a list */
 void curvetool_press(int row);                 /* a click on a button or choice */
 void curvetool_slide(int row, double value);   /* a slider moved (already stepped and clamped) */
 void curvetool_mouse(const curve_view *v, int type, double px, double py, int ctrl, int alt, int shift); /* the left button */
@@ -181,6 +202,16 @@ double curvetool_brush_tri_lean(void);      /* its tip along the base: 0 over th
 int curvetool_typing(void);                 /* a name is being typed: every key is ours */
 void curvetool_type(int key);               /* a key's character while typing (Enter keeps, Esc cancels, Backspace) */
 void curvetool_gradients_changed(void);     /* the game's gradient list was reordered: forget marks on its profiles */
+/* Curves in Gradient Placement's group (gradtool.c): an index is good while curvetool_curves_gen() stays the same. */
+int curvetool_curves_gen(void);
+int curvetool_curve_count(void);
+int curvetool_curve_near(double x, double z, double reach, double *dist); /* the nearest curve line within reach, -1 */
+int curvetool_curve_middle(int i, double *x, double *z);                  /* halfway along it */
+int curvetool_curve_first(int i, double *x, double *z);                   /* its first point */
+int curvetool_curve_line(int i, double (*out)[2], int max);               /* its line, for drawing; how many points */
+void curvetool_curve_shift(int i, double dx, double dz);                  /* every point and handle moved */
+void curvetool_group_move_begin(void);                                    /* a group move is one curve undo step */
+void curvetool_group_move_end(void);
 
 /* gradtool.c: tools for the game's own gradients (Delete, Undo Delete, Export, Saved Gradients, Place) and the radial
    brushes' sweep. Its rows go in our panel while the game's tools are in use; their kinds start at GRADTOOL_ROW. */
@@ -190,9 +221,15 @@ void gradtool_press(int kind, int arg);
 void gradtool_slide(int kind, double value);
 void gradtool_frame(void);
 int gradtool_placing(void);                 /* the next click on the map places a saved gradient */
+/* In Placement: Ctrl+press on a gradient's or curve's line puts it in the group or takes it out, Ctrl+press on empty
+   ground boxes them; Shift+press on a line moves it whole, or the whole group if it's in the group. */
+int gradtool_down(double x, double z, double ft_per_px, int shift, int ctrl); /* 1 if the press is ours */
+int gradtool_dragging(void);
+void gradtool_move(double x, double z);
+void gradtool_up(void);
 void gradtool_place(double x, double z);
 int gradtool_key(int key);                  /* 1 if it used the key (Del, Esc) */
-void gradtool_scene(scene *out, double mouse_x, double mouse_z);
+void gradtool_scene(scene *out, double mouse_x, double mouse_z, double ft_per_px);
 enum { SWEEP_BOTH, SWEEP_CLOCKWISE, SWEEP_COUNTER };
 int gradtool_sweep(double *degrees, int *side); /* 1 when the radial brushes shouldn't sweep the game's own way */
 /* The sweep's middle direction and half width in radians for a gradient from A to B (x right, z down the screen). */
@@ -257,6 +294,23 @@ const char *game_statue_editable(void);         /* NULL when an edit may go ahea
 /* Each NULL on success, else why. They call the game's statue update and set the track's modified flag. */
 const char *game_statue_set_pose(int i, const statue_pose *p); /* x, z and rot */
 const char *game_statue_snap(int i);            /* the game's Snap to Gradient, on the selected gradient */
+/* The game's own statue add and delete (its `d` and Del). Call game_statues_changed once after a batch of them. */
+int game_statue_copies_known(void);
+const char *game_statue_copy(int i, float x, float z, float rot, int *new_index); /* appended at the end of the list */
+const char *game_statue_drop_last(void);
+void game_statues_changed(void);
+const char *game_texture_name(uint32_t id); /* a texture's name (statue or decal), NULL if unknown; valid until the next call */
+const char *game_statue_texture(int i);     /* statue i's texture name, NULL if none or unknown */
+int game_statue_files(int i, char *mesh, char *shape, size_t cap); /* its mesh and shape names ("" for none) */
+/* Statue i pointed at other mesh and shape files (NULL shape = none), at the same index, all else kept. */
+const char *game_statue_set_files(int i, const char *mesh, const char *shape);
+
+/* statuescale.c: resized copies of a statue's mesh and shape, in the app's layout (statue/scaled/<mesh>-<pct>pct/). */
+/* The files for statue files (mesh, shape) at `by` times their present size: written if needed, names put in out_*.
+   NULL on success, else why. *total gets the size against the original. */
+const char *statuescale_files(const char *mesh, const char *shape, double by, char *out_mesh, char *out_shape, size_t cap,
+                              double *total);
+double statuescale_factor(const char *mesh); /* how many times its original size a mesh is (1 for an original) */
 
 /* statuetool.c: a group of statues in Statues mode (13), picked with Ctrl+click and Ctrl+drag, moved by dragging one of
    them or snapped to the selected gradient together, with our undo. Its rows go in our panel in mode 13; their kinds start at STATUETOOL_ROW. */
@@ -264,12 +318,13 @@ const char *game_statue_snap(int i);            /* the game's Snap to Gradient, 
 int statuetool_active(void);                /* mode 13, our tool off, this build's statue calls known */
 int statuetool_rows(panel_row *rows, int max, int *kinds, int *args);
 void statuetool_press(int kind, int arg);
+void statuetool_slide(int kind, double value);
 void statuetool_frame(void);
 int statuetool_down(double x, double z, int ctrl); /* 1 if the press is ours (Ctrl, or a plain press on a group statue) */
 void statuetool_move(double x, double z);
 void statuetool_up(void);
 int statuetool_dragging(void);
-int statuetool_key(int key, int ctrl);      /* 1 if it used the key */
+int statuetool_key(int key, int ctrl, double mouse_x, double mouse_z); /* 1 if it used the key */
 void statuetool_scene(scene *out, double mouse_x, double mouse_z, double ft_per_px);
 
 /* stamptool.c: rut stamps, a height image (made in Photoshop, say) placed on the ground like a layer: moved and turned

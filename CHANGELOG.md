@@ -6,11 +6,136 @@ What each version of the MX Simulator Tools editor mod added or changed, newest 
 Versions before 0.36 were rebuilt from the notes in `.claude/skills/mx-editor-mod/ingame-tools.md` and from the text in
 each packaged DLL in `dist\` (0.26.0 onward), since git has only one commit. Nothing was found for 0.22, 0.24 or 0.26.
 
+## 0.45.1 (2026-11-16)
+- `g` in Statues mode (13) with a statue group: Snap Group to Gradient, the same as the button. (`s` stays the game's
+  save.) Ctrl+Z undoes it as before.
+- Not tried in the game yet.
+
+## 0.45.0 (2026-11-15)
+- STATUE SIZE in Statues mode (13): resize statues in the editor the way MX Simulator Tools does.
+  - Works on the statue group, or on the statue the game has selected when there's no group.
+  - Scale by (%) (10 to 300) and Scale Group / Scale Statue multiply each statue's present size about its own centre.
+    Real Size puts it back to the original files. The panel shows the (first) statue's size against its original.
+  - The files are the app's: `<track>/statue/scaled/<mesh>-<pct>pct/` with the scaled `.jm`, its `_lod` meshes, its
+    `_norm` / `_spec` maps, the scaled `.shp` and `mx-tools-scale.json`. Each tool picks up the other's copies, and a
+    resize always counts from the original, so sizes don't drift. Checked byte for byte against the app's scaler.
+  - The files are written straight away (the game has to load them), and the statue keeps its place in the list, its
+    position, turn, height and texture. Press s to save the statues file.
+  - Only loose files can be resized here. A mesh inside a .saf pack (or gzipped) says to use the app instead.
+  - Ctrl+Z (or Undo Statue Size) puts the old files back.
+  - 1684 only.
+- Not tried in the game yet.
+
+## 0.44.0 (2026-11-15)
+- Clicking a decal (Decals mode, 15) shows its texture's name in the status line, with its number and size, like
+  billboards do.
+- Clicking a statue (Statues mode, 13) shows its texture's (png's) name in the status line, with its number.
+- Both read the name with the game's own texture-name call (the one its statues and decals writers use). 1684 only.
+- Not tried in the game yet.
+
+## 0.43.0 (2026-11-15)
+- Duplicate Group in Statues mode (13): copies every statue in the statue group with the game's own add (the one its
+  `d` uses), keeping each one's object, turn and height above the ground.
+  - `d` with the mouse on the map puts the copies so the group's middle lands on the mouse. With no group, `d` is the
+    game's own one-statue copy as before.
+  - The Duplicate Group button in STATUE GROUP puts them 10 ft along +x from the originals.
+  - The group becomes the copies (gold), so a drag on one places them all.
+  - Ctrl+Z (or Undo Statue Copy) takes the copies back off. It works only while the statue list is as the copy left it.
+  - 1684 only, like the rest of the statue group.
+- Not tried in the game yet.
+
+## 0.42.0 (2026-11-14)
+- Gradient group in Gradient Placement (9), like the statue group, holding the game's gradients and the mod's curves
+  together:
+  - Ctrl+click a gradient's or curve's line to add it to the group or drop it. With an empty group, the game's
+    selected gradient joins too, so "click one, Ctrl+click the rest" works.
+  - Ctrl+drag on empty ground draws a box; every gradient and curve whose middle is inside joins.
+  - Shift+drag any gold line moves the whole group by the same offset. Profiles stay as they are and the ground doesn't
+    change, as with the single move. Shift+drag on a line outside the group still moves just that one, and that now
+    works on curves too.
+  - Group lines are gold; with Ctrl or Shift held, the line a press would grab is outlined faintly. GRADIENT GROUP in
+    the panel shows the count, Clear Group and the keys.
+  - One group move is one undo step (Ctrl+Z or Undo Gradient Move, 16 kept). Anything changed since is left where it
+    is. A move that includes curves is also one step in Curve Path's own undo.
+  - Gradients leave the group when one is added or deleted (their numbers shift); curves leave it when one is deleted
+    or the curves file is read again. Another track empties it.
+  - Ctrl+click on empty ground in Placement now starts the box instead of reaching the game.
+- Not tried in the game yet.
+
+## 0.41.0 (2026-11-14)
+- Ease Plain Points (curve tool, under Bake Side): On by default. When a curve's line runs through a plain point
+  (one with no handles) and carries on within 30 degrees of straight, the bake gives that point short handles along the
+  line, so it turns over a few feet instead of on the spot. This takes out most of the notch across the inside of a
+  jump where a straight runs into a bend: on 1Halo's test curve the steepest step between neighbouring cells at the
+  bend start went from 0.73 ft to 0.28 ft. The drawn line doesn't change; the baked one moves up to about 0.6 ft near
+  such a point, and the profile slides by about 0.1 ft. Sharper corners stay sharp. Off bakes as before. Remembered
+  between sessions; not kept in curve presets. The app doesn't do this yet, so with it on the two bake differently.
+- Not tried in the game yet.
+
+## 0.40.1 (2026-11-12)
+- Bake Side Left/Right now keeps the full-height part between both inner lines and leaves out only the other side's
+  fade, so that side ends in a hard edge at its inner line (0.40.0 cut it at the curve line). Bank still pivots on the
+  curve line.
+- Not tried in the game yet.
+
+## 0.40.0 (2026-11-12)
+- Bake Side (curve tool, under Bank): Both, Left or Right. Left or Right bakes only that side of the curve's line,
+  looking from the curve's start to its end on the map; the other side's ground isn't touched. With Bank this makes a
+  one-sided banked turn that rises from the line outward. Kept in curve presets and remembered between sessions.
+- Not tried in the game yet.
+
+## 0.39.2 (2026-11-12)
+- Bank goes from -0.5 to 0.5 (was -1 to 1), so the slider is finer. 0.5 is about 27 degrees. A saved preset or setting
+  past 0.5 is held to 0.5 when it's read.
+- Not tried in the game yet.
+
+## 0.39.1 (2026-11-12)
+- Fix: Bank could never be set back to 0 once moved. The slider has 200 steps but fewer pixels, so 0 fell between two
+  pixels. Sliders that run through zero now snap to 0 within 4 px of it, and every slider value is a whole number of
+  steps.
+- Not tried in the game yet.
+
+## 0.39.0 (2026-11-12)
+- Ground Grid (new VIEW group at the top of the panel): Off, 5, 10, 25, 50 or 100 ft lines over the track, in every
+  mode. Brighter every 100 ft (every 5th line for the 50 and 100 ft grids). Zoomed far out it thins the lines and says
+  so ("Zoomed out: lines every 50 ft"). Kept off the game's left panel, drawn under the mod's other lines, and
+  remembered between sessions.
+- Move a whole gradient: in Gradient Placement (9), hold Shift and drag a gradient's line. Both ends move together and
+  the profile stays as it is. With Shift held, the line a press would grab is outlined in gold. Ctrl+Z (or Undo Gradient
+  Move) puts the last 16 moves back. The ground doesn't change; only the gradient does.
+- Not tried in the game yet.
+
+## 0.38.0 (2026-11-12)
+- Undo for curve edits: Ctrl+Z undoes, Ctrl+Y redoes (also the Undo Curve Edit and Redo buttons in Curve Path and
+  Curve Profile). A press and drag, a panel button or a key is one step; 64 kept. Picking a curve alone isn't a step.
+  Cleared when the curves file is read again (another track, or the app rewrote it). The game's Backspace still
+  undoes ground changes.
+- Undo Delete Section and Undo Delete Preset: the last 16 deleted, put back at their old place, newest first.
+- The curve tool remembers its settings between sessions (Inner, Outer, Bank, Strength, Bake As, SubMode, Path
+  Change, Granularity, Terrain Fit) in `mxtools\curve-settings.txt`.
+- Fix: curve Live Preview now puts the track's min and max height back when it comes off (and before a save), as Berm
+  Preview does, so a preview that reached higher or lower doesn't change how Save scales terrain.png. A height change
+  the game's own brush made meanwhile is kept. Apply widens it only as far as the baked curve needs.
+- Not tried in the game yet.
+
+## 0.37.0 (2026-11-12)
+- Fold groups: click a gold header (now marked `[-]`) to hide the rows under it, and again (`[+]`) to show them.
+  Folded groups are remembered between sessions (`mxtools\panel-folds.txt`). A header lights up under the mouse.
+- Long lists scroll: the Section, Curve Presets, Brush Presets and Saved Gradients dropdowns show 8 at a time, with
+  "^ n more above" / "v n more below" rows to page through, and the mouse wheel over the list scrolls it. The buttons
+  under a list (Paste, Rename, Delete) stay on screen. Opening a list scrolls to the one chosen.
+- The panel is built in full before folding, so folding a group frees its rows for the groups below it.
+- Not tried in the game yet.
+
+## 0.36.3 (2026-11-12)
+- The panel's top-right label reads "Jcraig's Editor Mod 0.36.3" (was "MX Tools ..."), a little larger and in light
+  gold so it's easy to read.
+
 ## 0.36.2 (2026-11-12)
 - Statue group: drag any statue with a gold ring to move the whole group by the same offset. Each keeps its turn and
   its height above the ground. One drag is one undo step (Undo Statue Move, or Ctrl+Z), sharing the 16 steps with
   Snap. A plain click on a group statue no longer selects it in the game; on other statues it still does.
-  Not tried in the game yet.
+  Tested in the game (2026-11-12): works.
 
 ## 0.36.1 (2026-11-10)
 - On build 1684 the panel no longer says "Smooth stays round", and the shape's outline shows in Smooth too. On 1684,
@@ -23,14 +148,14 @@ each packaged DLL in `dist\` (0.26.0 onward), since git has only one commit. Not
   - Snap Group to Gradient runs the game's own Snap to Gradient on every statue in the group, against the selected
     gradient. Undo Statue Snap (or Ctrl+Z) puts them back, 16 steps.
   - Group statues show a gold ring. The group clears when a statue is added or deleted.
-  - Not tried in the game yet.
+  - Tested in the game (2026-11-12): works.
 
 ## 0.35.2 (2026-11-09)
 - Removed the mod's decal copy (D and "Copy To Its Right"). `d` is the game's own copy again.
 
 ## 0.35.1 (2026-11-09)
 - The mouse wheel zooms the editor (0.25 of the Zoom slider a notch), keeping the ground under the cursor in place.
-  Not tried in the game yet.
+  Tested in the game (2026-11-12): works.
 
 ## 0.35.0 (2026-11-09)
 - Decal editing in Decals mode (build 1684 only; 1.0 and 1681 show "Not ported to this game build yet"):
@@ -40,7 +165,7 @@ each packaged DLL in `dist\` (0.26.0 onward), since git has only one commit. Not
   - `[` `]` scale 10%; `{` `}` scale 1% (only while the game's group is empty).
   - Delete Decal, and our own undo (Ctrl+Z, 64 steps per track).
   - A copy key (D), removed in 0.35.2.
-  - Not tried in the game yet.
+  - Tested in the game (2026-11-12): works.
 
 ## 0.34.1 (2026-11-09)
 - Rut Stamp shelved: the button is hidden. The code is kept, and building with `MXMOD_STAMP=1` brings it back.

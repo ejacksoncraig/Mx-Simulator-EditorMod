@@ -231,6 +231,16 @@ static const int *row_rect(int i)
     int kind = g_panel[i].kind;
     return kind == ROWK_BUTTON ? g_btn[i].rect : kind == ROWK_CHOICE ? g_ch[i].rect : kind == ROWK_SLIDER ? g_sl[i].rect : none;
 }
+/* The row under the mouse by the panel's layout (row i's widget spans 0.5 + 1.5 i .. 1.5 + 1.5 i units down; the
+   gaps go to the nearer row), for rows with no widget rect: headers to fold, list rows for the wheel. -1 if none. */
+static int row_at_mouse(void)
+{
+    if (!over_our_panel())
+        return -1;
+    float unit_px = win_h() / 64.0f, y = mouse_y() / unit_px - 0.25f;
+    int i = y < 0 ? -1 : (int)(y / 1.5f);
+    return i >= 0 && i < g_row_count ? i : -1;
+}
 static int over_row(int i)
 {
     const int *r = row_rect(i);
@@ -243,9 +253,18 @@ static void slide_to_mouse(int i)
     const game_slider *s = &g_sl[i];
     if (s->bar[1] <= s->bar[0])
         return;
-    double t = (double)(mouse_x() - s->bar[0]) / (s->bar[1] - s->bar[0]);
+    double width = s->bar[1] - s->bar[0];
+    double t = (double)(mouse_x() - s->bar[0]) / width;
     t = t < 0 ? 0 : t > 1 ? 1 : t;
     double value = s->min + floor((s->max - s->min) * t / s->step + 0.5) * s->step;
+    value = floor(value / s->step + 0.5) * s->step; /* a whole number of steps, so 0 is 0 and not 1e-16 */
+    /* A slider through zero (Bank -1..1) has more steps than pixels, so 0 can fall between two pixels and never be
+       reachable. Within 4 px of zero it snaps there. */
+    if (s->min < 0 && s->max > 0) {
+        double zero_px = s->bar[0] + (0 - s->min) / (s->max - s->min) * width;
+        if (fabs(mouse_x() - zero_px) <= 4)
+            value = 0;
+    }
     curvetool_slide(i, value > s->max ? s->max : value);
 }
 
@@ -373,7 +392,7 @@ static void overlay_draw(void)
     double mouse_wx = (mouse_x() - w / 2) / (double)h * view_ft + cv.cx, mouse_wz = (mouse_y() - h / 2) / (double)h * view_ft + cv.cz;
     brush_outline(&g_own, &cv, mouse_wx, mouse_wz);
     if (curvetool_mode() == CURVE_MODE_OFF) {
-        gradtool_scene(&g_own, mouse_wx, mouse_wz);
+        gradtool_scene(&g_own, mouse_wx, mouse_wz, view_ft / h);
         decaltool_scene(&g_own, mouse_wx, mouse_wz, view_ft / h);
         statuetool_scene(&g_own, mouse_wx, mouse_wz, view_ft / h);
     }
@@ -437,12 +456,23 @@ static void overlay_draw(void)
             g_sl[i].label = row->label, g_sl[i].value = row->value, g_sl[i].step = row->step;
             g_sl[i].min = row->min, g_sl[i].max = row->max;
             GAME(RVA_SLIDER, slider_fn)(&g_sl[i], hot, pos, scale, 20.0f, 0.0f, 0.5f);
+        } else if (row->kind == ROWK_TITLE) {
+            /* The mod's name and version: 1.15x the readout's size in a light gold, still right-aligned on the panel's
+               20-unit row (the width is divided by the scale so the right edge stays put). */
+            static const float title[4] = {1.0f, 0.93f, 0.62f, 1.0f}, clear[4] = {0, 0, 0, 0};
+            const float big = 1.15f;
+            GAME(RVA_PUSH, v_fn)();
+            GAME(RVA_SCALE, fff_fn)(big, big, 1.0f);
+            GAME(RVA_READOUT, readout_fn)(row->label, title, clear, 20.0f / big, 1.0f);
+            GAME(RVA_POP, v_fn)();
         } else if (row->kind == ROWK_HEADER || row->kind == ROWK_HINT || row->kind == ROWK_FAINT) {
             /* Text with no box: a header in the gold the tools draw with, a hint in soft grey, small print (the
                version) faint and against the right edge. */
             static const float head[4] = {1.0f, 0.824f, 0.290f, 1.0f}, hint[4] = {0.82f, 0.82f, 0.82f, 0.9f};
             static const float faint[4] = {0.85f, 0.85f, 0.85f, 0.4f}, clear[4] = {0, 0, 0, 0};
-            const float *colour = row->kind == ROWK_HEADER ? head : row->kind == ROWK_HINT ? hint : faint;
+            static const float head_hot[4] = {1.0f, 0.95f, 0.75f, 1.0f}; /* a header under the mouse: a click folds it */
+            const float *colour = row->kind == ROWK_HEADER ? (curvetool_header(i) && row_at_mouse() == i ? head_hot : head)
+                                  : row->kind == ROWK_HINT ? hint : faint;
             GAME(RVA_READOUT, readout_fn)(row->label && row->label[0] ? row->label : row->text, colour, clear, 20.0f,
                                           row->kind == ROWK_FAINT ? 1.0f : 0.0f);
         } else {
@@ -564,7 +594,13 @@ static void wheel_zoom(int delta)
     g_wheel_rest += delta;
     int notches = g_wheel_rest / WHEEL_DELTA;
     g_wheel_rest -= notches * WHEEL_DELTA;
-    if (!notches || !pointers_ok() || over_our_panel() || mouse_x() < 21.25f * (win_h() / 64.0f))
+    if (!notches || !pointers_ok())
+        return;
+    if (over_our_panel()) {
+        curvetool_wheel(row_at_mouse(), notches); /* over a list: scroll it; elsewhere on the panel: nothing */
+        return;
+    }
+    if (mouse_x() < 21.25f * (win_h() / 64.0f))
         return;
     double zoom, step, lo, hi;
     if (!game_slider_get(GAME_SLIDER_ZOOM, &zoom, &step, &lo, &hi))
@@ -649,6 +685,10 @@ void ingame_frame(void)
         float x, z;
         world_at(px, py, &x, &z);
         decaltool_move(x, z, (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0, (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
+    } else if ((px != g_last_px || py != g_last_py) && gradtool_dragging()) {
+        float x, z;
+        world_at(px, py, &x, &z);
+        gradtool_move(x, z);
     } else if ((px != g_last_px || py != g_last_py) && statuetool_dragging()) {
         float x, z;
         world_at(px, py, &x, &z);
@@ -929,10 +969,19 @@ static uintptr_t draw_detour(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d)
     return r;
 }
 
+static int gradient_grab(void)
+{
+    float x, z;
+    world_at(mouse_x(), mouse_y(), &x, &z);
+    return gradtool_down(x, z, view_ft_now() / win_h(), (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0,
+                         (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0);
+}
+
 static int g_our_press;   /* the left button went down on our panel, so its release is ours too */
 static int g_place_press; /* the left button placed a saved gradient, so its release is ours too */
 static int g_graph_press; /* the left button selected or dragged a range on the game's Gradient Edit graph */
 static int g_decal_press; /* the left button picked a decal or grabbed one of its handles in Decals mode */
+static int g_gradient_press; /* the left button (with Shift) grabbed a whole gradient in Placement */
 static int g_statue_press; /* the left button (with Ctrl) toggled a statue in the group or started a box in Statues mode */
 
 static int key_detour(int key, int down)
@@ -942,6 +991,12 @@ static int key_detour(int key, int down)
         int left = *(int *)(*(uint8_t **)(g_base + RVA_PTR_KEYS) + 0x20);
         if (key == left && down && over_our_panel()) {
             g_our_press = 1;
+            int head = row_at_mouse();
+            if (curvetool_header(head)) {
+                InterlockedIncrement(&g_presses);
+                curvetool_press(head); /* folds or unfolds its group */
+                return 1;
+            }
             for (int i = 0; i < g_row_count; i++)
                 if (over_row(i)) {
                     InterlockedIncrement(&g_presses);
@@ -964,6 +1019,12 @@ static int key_detour(int key, int down)
             /* The game never saw this press (a decal picked, or a handle dragged), so it doesn't see the release. */
             g_decal_press = 0;
             decaltool_up();
+            return 1;
+        }
+        if (key == left && !down && g_gradient_press) {
+            /* The game never saw this press (a whole gradient grabbed with Shift), so it doesn't see the release. */
+            g_gradient_press = 0;
+            gradtool_up();
             return 1;
         }
         if (key == left && !down && g_statue_press) {
@@ -1033,8 +1094,11 @@ static int key_detour(int key, int down)
                         g_statue_press = 1;
                         return 1;
                     }
-                } else if (key != left && down && key < 0x1000 && statuetool_key(key, ctrl)) {
-                    return 1; /* Ctrl+Z after a group snap */
+                } else if (key != left && down && key < 0x1000) {
+                    float x, z;
+                    world_at(mouse_x(), mouse_y(), &x, &z);
+                    if (statuetool_key(key, ctrl, x, z))
+                        return 1; /* Ctrl+Z after a group edit, d with a group */
                 }
             } else if (gradtool_placing()) {
                 /* Placing a saved gradient: a click on the map puts its A there, Esc cancels. Pan, zoom and the rest
@@ -1052,8 +1116,15 @@ static int key_detour(int key, int down)
                         gradtool_key(key);
                     return 1;
                 }
+            } else if (key == left && down && *(int *)(g_base + RVA_HOVERED_WIDGET) < 0 &&
+                       mouse_x() >= 21.25f * (win_h() / 64.0f) &&
+                       ((GetAsyncKeyState(VK_SHIFT) & 0x8000) || (GetAsyncKeyState(VK_CONTROL) & 0x8000)) &&
+                       game_editor_mode() == 9 && gradient_grab()) {
+                /* In Placement: Shift+press moves a line whole (or the group it's in), Ctrl+press makes the group. */
+                g_gradient_press = 1;
+                return 1;
             } else if (down && key < 0x1000 && gradtool_key(key)) {
-                return 1; /* Del in Gradient Placement or Edit */
+                return 1; /* Del in Gradient Placement or Edit, Ctrl+Z after a move */
             } else if (down && curvetool_range_key(key)) {
                 return 1; /* Esc lets go of a range of profile points */
             } else if (key == left && down && *(int *)(g_base + RVA_HOVERED_WIDGET) < 0 &&

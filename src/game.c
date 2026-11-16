@@ -939,6 +939,37 @@ const char *game_gradient_delete(int index)
     return NULL;
 }
 
+/* A gradient's two ends, its profile untouched (Shift+drag in Placement moves the whole line). Refused like the other
+   list edits: no track, locked, or the game holding the mouse button. */
+const char *game_gradient_set_ends(int index, float ax, float az, float bx, float bz)
+{
+    gradient_info gi;
+    const char *why = list_editable(&gi);
+    if (why)
+        return why;
+    if (index < 0 || index >= gi.count)
+        return "That gradient isn't there any more.";
+    if (!(ax > -1e6f && ax < 1e6f && az > -1e6f && az < 1e6f && bx > -1e6f && bx < 1e6f && bz > -1e6f && bz < 1e6f))
+        return "Those ends aren't usable numbers.";
+    if (g_readonly) {
+        mx_log("READONLY: would move gradient %d", index);
+        return NULL;
+    }
+    game_gradient *g = &gi.list[index];
+    g->ax = ax, g->az = az, g->bx = bx, g->bz = bz;
+    return NULL;
+}
+
+void game_gradient_select(int index)
+{
+    gradient_info gi;
+    if (g_readonly || !read_gradients(&gi) || index < 0 || index >= gi.count)
+        return;
+    if (gi.selected != index)
+        *(int *)(g_base + RVA_SELECTED_POINT) = -1;
+    *(int *)(g_base + RVA_SELECTED_GRADIENT) = index;
+}
+
 const char *game_gradient_insert(int index, const gradient_copy *src)
 {
     gradient_info gi;
@@ -1440,6 +1471,223 @@ const char *game_statue_snap(int i)
     }
     statue_write(s, nx, nz, nrot);
     return NULL;
+}
+
+/* ── copying and removing statues: the game's own `d` and Del (1684 0xec1f7, 0xec35e; game/statues.md 6) ──
+   `d` reads the selected record's names (mesh +0x00 -> *(char **), shape +0x08 -> *(char **), texture id +0x10 -> the
+   texture-name call), then add(mouse x, offset +0x28, mouse z, rot +0x2c, mesh, texture, shape), the loader's own add,
+   which appends and returns the new index; then the changed call, then modified = 7. Del on the last statue: free(record),
+   count - 1, changed, modified. */
+#define S_OFFSET 0x28u
+typedef int (*statue_add_fn)(float x, float y_offset, float z, float rot, const char *mesh, const char *tex, const char *shape);
+typedef void (*statue_free_fn)(void *statue);
+typedef void (*statues_changed_fn)(void);
+typedef const char *(*texture_name_fn)(int id);
+
+int game_statue_copies_known(void)
+{
+    static int checked, known;
+    if (checked)
+        return known;
+    checked = 1;
+    if (!game_statues_known() || !g_build->rva_statue_add || !g_build->rva_statue_free || !g_build->rva_statues_changed ||
+        !g_build->rva_texture_name) {
+        mx_log("statues: this build's statue add and delete aren't ported, so Duplicate Group is off");
+        return 0;
+    }
+    const uint32_t at[4] = {g_build->rva_statue_add, g_build->rva_statue_free, g_build->rva_statues_changed,
+                            g_build->rva_texture_name};
+    for (int k = 0; k < 4; k++) {
+        const void *p = (const void *)(g_base + at[k]);
+        if (!mx_readable(p, 16) || memcmp(p, g_build->statue_add_sig[k], 16) != 0) {
+            mx_log("statues: the code at rva %#x isn't the one checked, so Duplicate Group is off", at[k]);
+            return 0;
+        }
+    }
+    known = 1;
+    return 1;
+}
+
+/* A name the game keeps behind a pointer whose first field is the name (mesh, shape), copied out; "" for none. */
+static int copy_name(char *out, size_t size, const char *name)
+{
+    out[0] = 0;
+    if (!name)
+        return 1;
+    size_t n = 0;
+    while (n < size && mx_readable(name + n, 1) && name[n])
+        n++;
+    if (n >= size || !mx_readable(name + n, 1))
+        return 0;
+    memcpy(out, name, n + 1);
+    return 1;
+}
+
+static int owned_name(char *out, size_t size, uintptr_t field)
+{
+    uintptr_t obj = *(uintptr_t *)field;
+    if (!obj)
+        return copy_name(out, size, NULL);
+    return mx_readable((const void *)obj, sizeof(char *)) && copy_name(out, size, *(const char **)obj);
+}
+
+const char *game_statue_copy(int i, float x, float z, float rot, int *new_index)
+{
+    *new_index = -1;
+    const char *why = game_statue_editable();
+    if (why)
+        return why;
+    if (!game_statue_copies_known())
+        return "This game version's statue copy isn't known to the mod.";
+    if (!(x > -1e6f && x < 1e6f && z > -1e6f && z < 1e6f && rot > -1e3f && rot < 1e3f))
+        return "That statue's numbers aren't usable.";
+    int n;
+    uintptr_t s = statue_at(i, &n);
+    if (!s)
+        return "That statue isn't there any more.";
+    /* Copied out first: the add may grow the list (and move this record) before it reads them. */
+    static char mesh[1024], tex[1024], shape[1024];
+    if (!owned_name(mesh, sizeof mesh, s + 0x00) || !owned_name(shape, sizeof shape, s + 0x08) ||
+        !copy_name(tex, sizeof tex, ((texture_name_fn)(g_base + g_build->rva_texture_name))(*(int *)(s + 0x10))))
+        return "That statue's file names couldn't be read.";
+    float offset = *(float *)(s + S_OFFSET);
+    if (g_readonly) {
+        mx_log("READONLY: would copy statue %d (%s) to (%.3f, %.3f)", i, mesh, x, z);
+        *new_index = n;
+        return NULL;
+    }
+    int got = ((statue_add_fn)(g_base + g_build->rva_statue_add))(x, offset, z, rot, mesh[0] ? mesh : NULL,
+                                                                   tex[0] ? tex : NULL, shape[0] ? shape : NULL);
+    int now;
+    statue_at(-1, &now);
+    if (now != n + 1) {
+        mx_log("statues: the add gave index %d with the list at %d (was %d)", got, now, n);
+        return "The game didn't add the copy.";
+    }
+    if (got != n)
+        mx_log("statues: the add said index %d, but the list grew to %d", got, now);
+    *new_index = n;
+    return NULL;
+}
+
+const char *game_statue_drop_last(void)
+{
+    const char *why = game_statue_editable();
+    if (why)
+        return why;
+    if (!game_statue_copies_known())
+        return "This game version's statue delete isn't known to the mod.";
+    uintptr_t w = 0;
+    int n;
+    uintptr_t s = statue_at(-1, &n);
+    (void)s;
+    if (n <= 0 || !read_ptr(g_base + g_build->rva_ptr_window, &w) || !w)
+        return "There's no statue to remove.";
+    if (g_readonly) {
+        mx_log("READONLY: would remove statue %d", n - 1);
+        return NULL;
+    }
+    ((statue_free_fn)(g_base + g_build->rva_statue_free))((void *)statue_at(n - 1, &n));
+    ((game_vector *)(w + g_build->statue_list))->count = n - 1;
+    int sel = -1;
+    if (read_i32(g_base + g_build->rva_selected_statue, &sel) && sel >= n - 1)
+        *(int *)(g_base + g_build->rva_selected_statue) = -1;
+    return NULL;
+}
+
+int game_statue_files(int i, char *mesh, char *shape, size_t cap)
+{
+    int n;
+    uintptr_t s = statue_at(i, &n);
+    return s && owned_name(mesh, cap, s + 0x00) && owned_name(shape, cap, s + 0x08);
+}
+
+/* Statue i with other mesh and shape files, everything else kept, and at the same index: the game's add makes the new
+   record at the end, the two records swap places, and the old one comes off the end the way Del takes it. Nothing keeps a
+   record's address across an add (the list can move), and the changed call after it rebuilds what the drawing holds. */
+const char *game_statue_set_files(int i, const char *mesh, const char *shape)
+{
+    const char *why = game_statue_editable();
+    if (why)
+        return why;
+    if (!game_statue_copies_known())
+        return "This game version's statue add isn't known to the mod.";
+    int n;
+    uintptr_t s = statue_at(i, &n);
+    if (!s)
+        return "That statue isn't there any more.";
+    static char tex[1024];
+    if (!copy_name(tex, sizeof tex, ((texture_name_fn)(g_base + g_build->rva_texture_name))(*(int *)(s + 0x10))))
+        return "That statue's texture name couldn't be read.";
+    float x = *(float *)(s + S_X), z = *(float *)(s + S_Z), rot = *(float *)(s + S_ROT), offset = *(float *)(s + S_OFFSET);
+    if (g_readonly) {
+        mx_log("READONLY: would point statue %d at %s / %s", i, mesh, shape ? shape : "null");
+        return NULL;
+    }
+    ((statue_add_fn)(g_base + g_build->rva_statue_add))(x, offset, z, rot, mesh, tex[0] ? tex : NULL, shape);
+    int now;
+    statue_at(-1, &now);
+    if (now != n + 1) {
+        mx_log("statues: the add for statue %d's new files left the list at %d (was %d)", i, now, n);
+        return "The game didn't take the new files.";
+    }
+    uintptr_t w = 0;
+    read_ptr(g_base + g_build->rva_ptr_window, &w);
+    const game_vector *v = (const game_vector *)(w + g_build->statue_list);
+    uintptr_t fresh = statue_at(n, &now), old = statue_at(i, &now);
+    if (!fresh || !old || v->stride > 4096)
+        return "The statue list couldn't be read after the add.";
+    if (!*(uintptr_t *)fresh) {
+        /* The game couldn't load the mesh: take the new one off again and leave the statue as it was. */
+        ((statue_free_fn)(g_base + g_build->rva_statue_free))((void *)fresh);
+        ((game_vector *)v)->count = n;
+        game_statues_changed();
+        return "The game couldn't load the new mesh, so the statue was left as it was.";
+    }
+    unsigned char tmp[4096];
+    memcpy(tmp, (void *)old, v->stride);
+    memcpy((void *)old, (void *)fresh, v->stride);
+    memcpy((void *)fresh, tmp, v->stride);
+    ((statue_free_fn)(g_base + g_build->rva_statue_free))((void *)fresh);
+    ((game_vector *)v)->count = n;
+    return NULL; /* the caller calls game_statues_changed once for the batch */
+}
+
+/* A texture's name from its id (the call the statues and decals writers use), copied out; NULL if unknown. */
+const char *game_texture_name(uint32_t id)
+{
+    static int checked, known;
+    if (!checked) {
+        checked = 1;
+        known = g_build && g_build->rva_texture_name && mx_readable((const void *)(g_base + g_build->rva_texture_name), 16) &&
+                memcmp((const void *)(g_base + g_build->rva_texture_name), g_build->statue_add_sig[3], 16) == 0;
+        if (!known)
+            mx_log("textures: this build's texture-name call isn't ported or doesn't check out, so picks don't show names");
+    }
+    if (!known || !id)
+        return NULL;
+    static char name[1024];
+    if (!copy_name(name, sizeof name, ((texture_name_fn)(g_base + g_build->rva_texture_name))((int)id)) || !name[0])
+        return NULL;
+    return name;
+}
+
+const char *game_statue_texture(int i)
+{
+    int n;
+    uintptr_t s = statue_at(i, &n);
+    return s ? game_texture_name(*(uint32_t *)(s + 0x10)) : NULL;
+}
+
+/* After a batch of copies or removals: the game's changed call and modified, as its `d` and Del do after each. */
+void game_statues_changed(void)
+{
+    if (!game_statue_copies_known() || g_readonly)
+        return;
+    ((statues_changed_fn)(g_base + g_build->rva_statues_changed))();
+    uintptr_t t = 0;
+    if (read_ptr(g_base + RVA_EDITOR_TERRAIN, &t) && t)
+        *(int *)(t + T_FLAGS) = 7;
 }
 
 /* APP LINK: only for MX Simulator Tools, the external track app. The in-game tools don't use this. */

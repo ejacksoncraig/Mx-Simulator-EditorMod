@@ -13,6 +13,7 @@
 #define MIN_DRAG_PX 3.0 /* CURVE_MIN_DRAG_PX */
 
 static curve_set g_curves;
+static int g_curves_gen; /* goes up whenever the curves may be renumbered (read again, one deleted, an undo) */
 static int g_mode;
 static int g_selected = -1;
 static int g_drawing; /* clicks add points to the selected curve, until it's finished */
@@ -29,6 +30,7 @@ static int g_point = -1;       /* the profile point picked in Curve Profile */
 static int g_pending_type;     /* Segment Type with no point picked (only the widget changes, as in the game) */
 static double g_granularity;   /* the profile graph's snap, 0 = none */
 static double g_trace_fit = 0.05; /* Set From Terrain: how close to the ground, ft */
+static int g_grid; /* the ground grid: an index into GRID_FT (0 = off) */
 static struct {
     int kind, curve, anchor, out_side, moved, changed, closes, resumes, split;
     double from_px, from_py;
@@ -81,8 +83,11 @@ static void status_now(void)
     snprintf(g_status, sizeof g_status, "%d curves%s", g_curves.count, g_dirty ? ", not saved" : "");
 }
 
+static void curve_undo_clear(void);
 static void load(void)
 {
+    curve_undo_clear(); /* the curves are read again: older copies are of something else */
+    g_curves_gen++;
     HANDLE f = CreateFileW(g_file, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                            0, NULL);
     if (f == INVALID_HANDLE_VALUE) {
@@ -172,13 +177,20 @@ static void follow_track(void)
     load();
 }
 
-void curvetool_start(void) { follow_track(); }
+static void settings_load(void);
+static void settings_frame(void);
+void curvetool_start(void)
+{
+    settings_load();
+    follow_track();
+}
 
 static void live_frame(void);
 static void brush_size_frame(void);
 
 void curvetool_frame(void)
 {
+    settings_frame();
     brush_size_frame();
     live_frame();
     stamptool_frame(g_mode == CURVE_MODE_STAMP);
@@ -278,6 +290,7 @@ static void delete_curve(int i)
     set_live(0);
     memmove(&g_curves.c[i], &g_curves.c[i + 1], (size_t)(g_curves.count - i - 1) * sizeof g_curves.c[0]);
     g_curves.count--;
+    g_curves_gen++;
     g_selected = -1;
     g_drawing = 0;
     g_dirty = 1;
@@ -532,25 +545,49 @@ static void mouse_up(void)
     }
 }
 
+static void act_begin(void);
+static void act_end(void);
+static void curve_undo(int redo);
+static int g_undo_n, g_redo_n; /* curve undo and redo steps (the undo section, before curvetool_press) */
+static int g_mouse_act; /* a press on the map began an undo step; its release ends it */
 void curvetool_mouse(const curve_view *v, int type, double px, double py, int ctrl, int alt, int shift)
 {
     double x = (px - v->w / 2) / v->h * v->view_ft + v->cx, z = (py - v->h / 2) / v->h * v->view_ft + v->cz;
-    if (g_mode == CURVE_MODE_STAMP)
+    if (g_mode == CURVE_MODE_STAMP) {
         stamptool_mouse(v, type, x, z, ctrl);
-    else if (type == CURVE_DOWN)
+    } else if (type == CURVE_DOWN) {
+        if (g_mouse_act) /* a release that never came: that step ends here */
+            g_mouse_act = 0, act_end();
+        act_begin(), g_mouse_act = 1; /* a press and its drag are one undo step */
         mouse_down(v, px, py, x, z, ctrl, alt, shift);
-    else if (type == CURVE_MOVE)
+    } else if (type == CURVE_MOVE) {
         mouse_move(px, py, x, z, alt);
-    else
+    } else {
         mouse_up();
+        if (g_mouse_act)
+            g_mouse_act = 0, act_end();
+    }
 }
 
 int curvetool_dragging(void) { return g_mode == CURVE_MODE_STAMP ? stamptool_dragging() : g_drag.kind != DRAG_NONE; }
 
+static int key_inner(int key);
 int curvetool_key(int key)
 {
     if (g_mode == CURVE_MODE_STAMP)
         return stamptool_key(key);
+    int ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (key == 26 || key == 25 || (ctrl && (key == 'z' || key == 'y'))) { /* Ctrl+Z / Ctrl+Y, as a control character or not */
+        curve_undo(key == 25 || key == 'y');
+        return 1;
+    }
+    act_begin();
+    int used = key_inner(key);
+    act_end();
+    return used;
+}
+static int key_inner(int key)
+{
     if (curvetool_range_key(key)) /* Esc lets go of a range first */
         return 1;
     if (key == 13 || key == 27) { /* Enter, Esc: finish */
@@ -577,17 +614,35 @@ static struct {
     float *shown;              /* what was last written, s_rows x s_cols from (s_row, s_col); NULL when nothing is */
     int s_row, s_col, s_rows, s_cols;
     curve last;                /* the curve last previewed, to preview again only when it changes */
-    double settings[6];        /* and the bake settings it used */
+    double settings[8];        /* and the bake settings it used */
     int last_index, frames, wait;
+    float lo, hi;              /* the track's height range before the preview (game_height_range); a write only widens it */
+    float after_lo, after_hi;  /* and as our last write left it, so a widening by the game's own tools is kept */
+    int have_range;
 } g_live;
 static double g_strength = 1, g_bank = 0;
-static int g_add = 0, g_limit = CURVE_LIMIT_NONE;
+static const double BANK_MAX = 0.5; /* ft of rise per ft out from the centre line: 0.5 is about 27 degrees */
+static int g_add = 0, g_limit = CURVE_LIMIT_NONE, g_bake_side = CURVE_SIDE_BOTH;
+static int g_ease_plain = 1; /* Ease Plain Points: curvemath.c eased */
 
 static void live_forget(void)
 {
     free(g_live.base), free(g_live.shown);
     g_live.base = g_live.shown = NULL;
     g_live.last_index = -1;
+    g_live.have_range = 0;
+}
+/* The height range as it was before the preview. Save scales terrain.png to it, so a preview that reached higher or
+   lower must not leave it wider (bermpreview.c does the same). */
+static void live_put_range_back(void)
+{
+    float lo, hi;
+    if (!g_live.have_range || !game_height_range(&lo, &hi))
+        return;
+    /* Past what our last write left, the game's own brush went there meanwhile: that part stays. */
+    lo = lo < g_live.after_lo ? lo : g_live.lo;
+    hi = hi > g_live.after_hi ? hi : g_live.hi;
+    game_set_height_range(lo, hi);
 }
 
 /* Everything saved must still be as left: the ground from before, with the last preview on it. */
@@ -618,6 +673,9 @@ static int live_cover(const game_map *m, int row0, int row1, int col0, int col1)
         r1 = r1 > er ? r1 : er, c1 = c1 > ec ? c1 : ec;
         if (r0 == g_live.at_row && c0 == g_live.at_col && r1 == er && c1 == ec)
             return 1;
+    } else {
+        g_live.have_range = game_height_range(&g_live.lo, &g_live.hi); /* the first cover: nothing of ours is on it yet */
+        g_live.after_lo = g_live.lo, g_live.after_hi = g_live.hi;
     }
     int rows = r1 - r0 + 1, cols = c1 - c0 + 1;
     float *grown = malloc((size_t)rows * cols * sizeof(float));
@@ -666,6 +724,8 @@ static const char *live_write(const double *painted, int final)
     free(g_live.shown);
     g_live.shown = block, g_live.s_row = g_live.at_row + top, g_live.s_col = g_live.at_col + left, g_live.s_rows = h,
     g_live.s_cols = w;
+    if (g_live.have_range)
+        game_height_range(&g_live.after_lo, &g_live.after_hi);
     return NULL;
 }
 
@@ -690,8 +750,10 @@ static const char *live_show(const curve *c, int final)
         return "out of memory";
     for (size_t i = 0; i < cells; i++)
         painted[i] = g_live.base[i];
+    if (final)
+        live_put_range_back(); /* Apply widens it again only as far as the baked curve needs */
     const char *why = curve_paint(painted, g_live.at_row, g_live.at_col, g_live.rows, g_live.cols, m.width, m.cell_ft, c,
-                                  g_inner, g_outer, g_strength, g_add, g_limit, g_bank, NULL)
+                                  g_inner, g_outer, g_strength, g_add, g_limit, g_bank, g_bake_side, NULL)
                           ? live_write(painted, final)
                           : "couldn't bake this curve";
     free(painted);
@@ -710,7 +772,8 @@ static void live_cancel(void)
         if (ground) {
             for (size_t i = 0; i < cells; i++)
                 ground[i] = g_live.base[i];
-            live_write(ground, 0);
+            if (!live_write(ground, 0))
+                live_put_range_back();
             free(ground);
         }
     }
@@ -734,6 +797,7 @@ int curvetool_before_save(void)
         free(ground);
         if (why)
             return 0; /* still on the ground, and still kept, so it can come off later */
+        live_put_range_back(); /* before the game's save scales terrain.png to it */
     }
     live_forget();
     g_live.wait = 30;
@@ -772,7 +836,7 @@ static void live_frame(void)
     if (++g_live.frames % 2)
         return;
     const curve *c = &g_curves.c[g_selected];
-    double settings[6] = {g_inner, g_outer, g_bank, g_strength, g_add, g_limit};
+    double settings[8] = {g_inner, g_outer, g_bank, g_strength, g_add, g_limit, g_bake_side, g_ease_plain};
     if (g_live.last_index == g_selected && !memcmp(&g_live.last, c, sizeof *c) &&
         !memcmp(g_live.settings, settings, sizeof settings))
         return;
@@ -809,15 +873,24 @@ enum {
     ROW_SEC_CHOICE, ROW_SEC_PASTE, ROW_SEC_DELETE, ROW_SEC_NONE, ROW_SEC_ITEM, ROW_SEC_RENAME, ROW_SEC_KEEP, ROW_SEC_CANCEL,
     ROW_SEC_TYPED, ROW_BRUSH_SHAPE, ROW_BRUSH_ANGLE, ROW_BRUSH_OVAL, ROW_BRUSH_TRI_WIDTH, ROW_BRUSH_TRI_LEAN, ROW_BRUSH_NOTE, ROW_HEADER, ROW_SEC_CLEAR,
     ROW_DUPLICATE, ROW_RNG_CLEAR, ROW_BRUSH_OUTER, ROW_BRUSH_INNER, ROW_PRE_CHOICE, ROW_PRE_ITEM, ROW_PRE_SAVE,
-    ROW_PRE_RENAME, ROW_PRE_DELETE, ROW_PRE_TYPED, ROW_PRE_KEEP, ROW_PRE_CANCEL, ROW_STAMP, ROW_TRACE_FIT, ROW_TRACE_GAME
+    ROW_PRE_RENAME, ROW_PRE_DELETE, ROW_PRE_TYPED, ROW_PRE_KEEP, ROW_PRE_CANCEL, ROW_STAMP, ROW_TRACE_FIT, ROW_TRACE_GAME,
+    ROW_SEC_UNDO, ROW_PRE_UNDO, ROW_CURVE_UNDO, ROW_CURVE_REDO, ROW_GRID, ROW_BAKE_SIDE, ROW_EASE_PLAIN
 };
-static int g_row_arg[64]; /* a list row's section, or a gradtool row's argument */
+/* The panel is built into BUILD_ROWS rows, then folded groups are taken out and the first MAX_PANEL_ROWS shown; the
+   kinds and arguments are packed down with the rows, so a shown row's index finds them. */
+enum { BUILD_ROWS = 160 };
+static int g_row_arg[BUILD_ROWS]; /* a list row's section, or a gradtool row's argument */
 static int g_sec_choice;  /* the section chosen in the Section row */
 static int g_sec_list_open;   /* the Section dropdown shows every saved section */
 enum { TYPING_NONE, TYPING_SECTION, TYPING_PRESET }; /* what a typed name is for */
 static int g_typing;          /* Rename Section or Rename Preset: the keyboard is ours */
 static int g_typing_kind;     /* TYPING_PRESET: which list (PRESET_*) */
 static int g_pre_choice[PRESET_KINDS], g_pre_open[PRESET_KINDS]; /* each preset list's chosen one, dropdown open */
+/* Undo Delete Section / Undo Delete Preset: the last few deleted, with where they were, put back newest first. */
+enum { DELETED_KEEP = 16 };
+static struct { section s; int at; } g_sec_deleted[DELETED_KEEP];
+static struct { preset p; int at; } g_pre_deleted[PRESET_KINDS][DELETED_KEEP];
+static int g_sec_deleted_n, g_pre_deleted_n[PRESET_KINDS];
 static char g_typed[48];
 static char g_typed_label[64];
 
@@ -1065,10 +1138,14 @@ static void sec_press(int kind)
             g_sec_choice = (g_sec_choice + 1) % library_count();
         return;
     } else if (kind == ROW_SEC_DELETE) {
+        section keep = library_get(g_sec_choice) ? *library_get(g_sec_choice) : (section){0};
         why = library_delete(g_sec_choice);
         if (!why) {
+            if (g_sec_deleted_n == DELETED_KEEP)
+                memmove(&g_sec_deleted[0], &g_sec_deleted[1], (DELETED_KEEP - 1) * sizeof g_sec_deleted[0]), g_sec_deleted_n--;
+            g_sec_deleted[g_sec_deleted_n].s = keep, g_sec_deleted[g_sec_deleted_n++].at = g_sec_choice;
             g_sec_choice = g_sec_choice >= library_count() ? library_count() - 1 : g_sec_choice;
-            say("Section deleted.");
+            say("Section deleted. Undo Delete Section puts it back.");
             return;
         }
     } else if (kind == ROW_SEC_PASTE) {
@@ -1098,10 +1175,15 @@ static void sec_press(int kind)
         say(why);
 }
 enum { MAX_PANEL_ROWS = 40 }; /* 1 + 40 * 1.5 units still fits the window's 64 */
-static int g_row_kind[MAX_PANEL_ROWS]; /* g_stretch (Path Change: 0 Extend, 1 Stretch) is with commit_shape */
+static int g_row_kind[BUILD_ROWS]; /* g_stretch (Path Change: 0 Extend, 1 Stretch) is with commit_shape */
 static const char *const RESIZE_OPTIONS[] = {"Extend", "Stretch"};
 static const char *const BAKE_OPTIONS[] = {"Paint", "Add"};
 static const char *const SUBMODE_OPTIONS[] = {"none", "raise", "lower"};
+static const char *const BAKE_SIDE_OPTIONS[] = {"Both", "Left", "Right"};
+static const char *const EASE_OPTIONS[] = {"Off", "On"};
+static const char *const GRID_OPTIONS[] = {"Off", "5 ft", "10 ft", "25 ft", "50 ft", "100 ft"};
+static const double GRID_FT[] = {0, 5, 10, 25, 50, 100};
+static double g_grid_shown_ft; /* the grid spacing drawn last frame, 0 for none */
 
 /* The smallest turning radius along the path, or a negative number if it's straight (curved.py tightest_turn). */
 typedef struct {
@@ -1214,7 +1296,7 @@ static void preset_current(int kind, double *v)
         v[i] = NAN;
     if (kind == PRESET_CURVE) {
         v[PC_INNER] = g_inner, v[PC_OUTER] = g_outer, v[PC_BANK] = g_bank, v[PC_STRENGTH] = g_strength;
-        v[PC_ADD] = g_add, v[PC_LIMIT] = g_limit;
+        v[PC_ADD] = g_add, v[PC_LIMIT] = g_limit, v[PC_SIDE] = g_bake_side;
         return;
     }
     double outer, inner, sweep;
@@ -1238,10 +1320,11 @@ static void preset_use(int kind, int i)
         if (HAVE(PC_OUTER)) g_outer = clampd(v[PC_OUTER], 0.5, 100);
         if (HAVE(PC_INNER)) g_inner = clampd(v[PC_INNER], 0, 50);
         if (g_inner > g_outer) g_inner = g_outer;
-        if (HAVE(PC_BANK)) g_bank = clampd(v[PC_BANK], -1, 1);
+        if (HAVE(PC_BANK)) g_bank = clampd(v[PC_BANK], -BANK_MAX, BANK_MAX);
         if (HAVE(PC_STRENGTH)) g_strength = clampd(v[PC_STRENGTH], 0, 1);
         if (HAVE(PC_ADD)) g_add = v[PC_ADD] != 0;
         if (HAVE(PC_LIMIT)) g_limit = (int)clampd(v[PC_LIMIT], 0, 2);
+        if (HAVE(PC_SIDE)) g_bake_side = (int)clampd(v[PC_SIDE], 0, 2);
     } else {
         if (HAVE(PB_SHAPE)) g_brush_shape = (int)clampd(v[PB_SHAPE], 0, BRUSH_TRIANGLE);
         if (HAVE(PB_ANGLE)) g_brush_angle = clampd(v[PB_ANGLE], 0, 360);
@@ -1263,7 +1346,7 @@ static int preset_rows(int kind, panel_row *rows, int n, int max)
 {
     panel_row *r = NULL;
 #define PROW(kind_, rowk, label_)                                                                                 \
-    (n < max && n < MAX_PANEL_ROWS ? (memset(r = &rows[n], 0, sizeof *r), g_row_kind[n] = (kind_), g_row_arg[n] = kind, \
+    (n < max && n < BUILD_ROWS ? (memset(r = &rows[n], 0, sizeof *r), g_row_kind[n] = (kind_), g_row_arg[n] = kind, \
                                       r->kind = (rowk), r->label = (label_), n++, 1)                                 \
                                    : (r = NULL, 0))
     PROW(ROW_HEADER, ROWK_HEADER, kind == PRESET_CURVE ? "CURVE PRESETS" : "BRUSH PRESETS");
@@ -1276,15 +1359,22 @@ static int preset_rows(int kind, panel_row *rows, int n, int max)
         if (PROW(ROW_PRE_CHOICE, ROWK_BUTTON, choice_label[kind]))
             r->on = g_pre_open[kind];
         if (g_pre_open[kind]) {
-            for (int i = 0; i < count; i++) {
+            int list = kind == PRESET_CURVE ? PANEL_LIST_CURVE_PRESETS : PANEL_LIST_BRUSH_PRESETS, first, last;
+            panel_list_range(list, count, &first, &last);
+            if (first > 0 && PROW(PANEL_LIST_UP, ROWK_BUTTON, panel_list_more(list, 1, first)))
+                r->list = list;
+            for (int i = first; i < last; i++) {
                 snprintf(item_label[kind][i], sizeof item_label[kind][i], "%s %s", i == g_pre_choice[kind] ? ">" : "  ", names[i]);
                 if (PROW(ROW_PRE_ITEM, ROWK_BUTTON, item_label[kind][i])) {
                     r->on = i == g_pre_choice[kind];
+                    r->list = list;
                     g_row_arg[n - 1] = kind * 1000 + i;
                 }
             }
+            if (last < count && PROW(PANEL_LIST_DOWN, ROWK_BUTTON, panel_list_more(list, 0, count - last)))
+                r->list = list;
             if (PROW(ROW_HEADER, ROWK_HINT, ""))
-                snprintf(r->text, sizeof r->text, "Click one to use it");
+                snprintf(r->text, sizeof r->text, count > PANEL_LIST_SHOW ? "Click one to use it; the wheel scrolls" : "Click one to use it");
         } else if (PROW(ROW_HEADER, ROWK_HINT, "")) {
             snprintf(r->text, sizeof r->text, "Click the name to pick and use one");
         }
@@ -1303,6 +1393,11 @@ static int preset_rows(int kind, panel_row *rows, int n, int max)
         }
         PROW(ROW_PRE_DELETE, ROWK_BUTTON, "Delete Preset");
     }
+    if (g_pre_deleted_n[kind]) {
+        static char undo_label[PRESET_KINDS][64];
+        snprintf(undo_label[kind], sizeof undo_label[kind], "Undo Delete Preset (%d)", g_pre_deleted_n[kind]);
+        PROW(ROW_PRE_UNDO, ROWK_BUTTON, undo_label[kind]);
+    }
 #undef PROW
     return n;
 }
@@ -1314,7 +1409,11 @@ static void preset_press(int kind_row, int arg)
         return;
     const char *why = NULL;
     switch (kind_row) {
-    case ROW_PRE_CHOICE: g_pre_open[kind] = !g_pre_open[kind]; break;
+    case ROW_PRE_CHOICE:
+        g_pre_open[kind] = !g_pre_open[kind];
+        if (g_pre_open[kind])
+            panel_list_show(kind == PRESET_CURVE ? PANEL_LIST_CURVE_PRESETS : PANEL_LIST_BRUSH_PRESETS, g_pre_choice[kind]);
+        break;
     case ROW_PRE_ITEM:
         g_pre_choice[kind] = arg % 1000;
         g_pre_open[kind] = 0;
@@ -1344,28 +1443,59 @@ static void preset_press(int kind_row, int arg)
         break;
     case ROW_PRE_KEEP: keep_typed(); break;
     case ROW_PRE_CANCEL: g_typing = TYPING_NONE; break;
-    case ROW_PRE_DELETE:
-        why = preset_delete(kind, g_pre_choice[kind]);
+    case ROW_PRE_DELETE: {
+        preset keep = preset_get(kind, g_pre_choice[kind]) ? *preset_get(kind, g_pre_choice[kind]) : (preset){0};
+        int at = g_pre_choice[kind];
+        why = preset_delete(kind, at);
         if (!why) {
+            int *nd = &g_pre_deleted_n[kind];
+            if (*nd == DELETED_KEEP)
+                memmove(&g_pre_deleted[kind][0], &g_pre_deleted[kind][1], (DELETED_KEEP - 1) * sizeof g_pre_deleted[0][0]), (*nd)--;
+            g_pre_deleted[kind][*nd].p = keep, g_pre_deleted[kind][(*nd)++].at = at;
             int count = preset_count(kind);
             g_pre_choice[kind] = g_pre_choice[kind] >= count ? (count ? count - 1 : 0) : g_pre_choice[kind];
-            say("Preset deleted.");
+            say("Preset deleted. Undo Delete Preset puts it back.");
         }
         break;
+    }
+    case ROW_PRE_UNDO: {
+        int *nd = &g_pre_deleted_n[kind];
+        if (!*nd)
+            break;
+        why = preset_insert(kind, g_pre_deleted[kind][*nd - 1].at, &g_pre_deleted[kind][*nd - 1].p);
+        if (!why) {
+            int at = g_pre_deleted[kind][--(*nd)].at, count = preset_count(kind);
+            g_pre_choice[kind] = at < count ? at : count - 1;
+            say("Preset put back.");
+        }
+        break;
+    }
     }
     if (why)
         say(why);
 }
 
-int curvetool_panel(panel_row *rows, int max)
+static panel_row g_all[BUILD_ROWS];
+static int build_panel(panel_row *rows, int max);
+static int fold_panel(int n, panel_row *out, int max_out);
+int curvetool_panel(panel_row *out, int max_out) { return fold_panel(build_panel(g_all, BUILD_ROWS), out, max_out); }
+
+static int build_panel(panel_row *rows, int max)
 {
     int n = 0;
     panel_row *r = NULL;
 #define ROW(kind_, rowk, label_)                                \
-    (n < max && n < MAX_PANEL_ROWS ? (memset(r = &rows[n], 0, sizeof *r), g_row_kind[n] = (kind_), r->kind = (rowk), \
+    (n < max && n < BUILD_ROWS ? (memset(r = &rows[n], 0, sizeof *r), g_row_kind[n] = (kind_), r->kind = (rowk), \
                                       r->label = (label_), n++, 1)                                                    \
                                    : (r = NULL, 0))
-    ROW(ROW_HEADER, ROWK_FAINT, "MX Tools " MXMOD_VERSION); /* so a screenshot says which version it was */
+    ROW(ROW_HEADER, ROWK_TITLE, "Jcraig's Editor Mod " MXMOD_VERSION); /* so a screenshot says which version it was */
+    ROW(ROW_HEADER, ROWK_HEADER, "VIEW");
+    if (ROW(ROW_GRID, ROWK_CHOICE, "Ground Grid"))
+        r->options = GRID_OPTIONS, r->count = 6, r->selected = g_grid;
+    if (g_grid > 0 && g_grid_shown_ft > GRID_FT[g_grid] && ROW(ROW_HEADER, ROWK_HINT, ""))
+        snprintf(r->text, sizeof r->text, "Zoomed out: lines every %.0f ft", g_grid_shown_ft);
+    else if (g_grid > 0 && g_grid_shown_ft == 0 && ROW(ROW_HEADER, ROWK_HINT, ""))
+        snprintf(r->text, sizeof r->text, "Zoom in to see the grid");
     ROW(ROW_HEADER, ROWK_HEADER, "CURVES");
     if (ROW(ROW_PATH, ROWK_BUTTON, "Curve Path"))
         r->on = g_mode == CURVE_MODE_PATH;
@@ -1376,7 +1506,7 @@ int curvetool_panel(panel_row *rows, int max)
         r->on = g_mode == CURVE_MODE_STAMP;
 #endif
     if (g_mode == CURVE_MODE_STAMP) {
-        int room = (max < MAX_PANEL_ROWS ? max : MAX_PANEL_ROWS) - n;
+        int room = max - n;
         if (room > 0)
             n += stamptool_rows(rows + n, room, g_row_kind + n, g_row_arg + n);
     }
@@ -1413,13 +1543,13 @@ int curvetool_panel(panel_row *rows, int max)
     }
     /* For the game's own gradients (Delete, Export, Saved Gradients, Gradient Length) and the radial sweep: gradtool.c. */
     if (g_mode == CURVE_MODE_OFF) {
-        int room = (max < MAX_PANEL_ROWS ? max : MAX_PANEL_ROWS) - n;
+        int room = max - n;
         if (room > 0)
             n += gradtool_rows(rows + n, room, g_row_kind + n, g_row_arg + n);
-        room = (max < MAX_PANEL_ROWS ? max : MAX_PANEL_ROWS) - n;
+        room = max - n;
         if (room > 0)
             n += decaltool_rows(rows + n, room, g_row_kind + n, g_row_arg + n); /* Decals mode (15) only */
-        room = (max < MAX_PANEL_ROWS ? max : MAX_PANEL_ROWS) - n;
+        room = max - n;
         if (room > 0)
             n += statuetool_rows(rows + n, room, g_row_kind + n, g_row_arg + n); /* Statues mode (13) only */
         if (game_mode >= 0 && game_mode <= 8)
@@ -1456,7 +1586,14 @@ int curvetool_panel(panel_row *rows, int max)
         if (ROW(ROW_OUTER, ROWK_SLIDER, "Outer"))
             r->value = g_outer, r->min = 0.5, r->max = 100, r->step = 0.5;
         if (ROW(ROW_BANK, ROWK_SLIDER, "Bank"))
-            r->value = g_bank, r->min = -1, r->max = 1, r->step = 0.01;
+            r->value = g_bank, r->min = -BANK_MAX, r->max = BANK_MAX, r->step = 0.01;
+        if (ROW(ROW_BAKE_SIDE, ROWK_CHOICE, "Bake Side"))
+            r->options = BAKE_SIDE_OPTIONS, r->count = 3, r->selected = g_bake_side;
+        if (g_bake_side != CURVE_SIDE_BOTH && ROW(ROW_HEADER, ROWK_HINT, ""))
+            snprintf(r->text, sizeof r->text, "%s of the line, from the curve's start",
+                     g_bake_side == CURVE_SIDE_LEFT ? "Left" : "Right");
+        if (ROW(ROW_EASE_PLAIN, ROWK_CHOICE, "Ease Plain Points"))
+            r->options = EASE_OPTIONS, r->count = 2, r->selected = g_ease_plain;
         if (ROW(ROW_STRENGTH, ROWK_SLIDER, "Strength"))
             r->value = g_strength, r->min = 0, r->max = 1, r->step = 0.05;
         if (ROW(ROW_BAKE_AS, ROWK_CHOICE, "Bake As"))
@@ -1554,15 +1691,22 @@ int curvetool_panel(panel_row *rows, int max)
                 if (ROW(ROW_SEC_CHOICE, ROWK_BUTTON, choice_label))
                     r->on = g_sec_list_open;
                 if (g_sec_list_open) {
-                    for (int i = 0; i < library_count(); i++) {
+                    int sections = library_count(), first, last;
+                    panel_list_range(PANEL_LIST_SECTIONS, sections, &first, &last);
+                    if (first > 0 && ROW(PANEL_LIST_UP, ROWK_BUTTON, panel_list_more(PANEL_LIST_SECTIONS, 1, first)))
+                        r->list = PANEL_LIST_SECTIONS;
+                    for (int i = first; i < last; i++) {
                         snprintf(item_label[i], sizeof item_label[i], "%s %s", i == g_sec_choice ? ">" : "  ", names[i]);
                         if (ROW(ROW_SEC_ITEM, ROWK_BUTTON, item_label[i])) {
                             r->on = i == g_sec_choice;
+                            r->list = PANEL_LIST_SECTIONS;
                             g_row_arg[n - 1] = i;
                         }
                     }
+                    if (last < sections && ROW(PANEL_LIST_DOWN, ROWK_BUTTON, panel_list_more(PANEL_LIST_SECTIONS, 0, sections - last)))
+                        r->list = PANEL_LIST_SECTIONS;
                     if (ROW(ROW_HEADER, ROWK_HINT, ""))
-                        snprintf(r->text, sizeof r->text, "Click one to use it");
+                        snprintf(r->text, sizeof r->text, sections > PANEL_LIST_SHOW ? "Click one to use it; the wheel scrolls" : "Click one to use it");
                 } else if (library_count() > 1 && ROW(ROW_HEADER, ROWK_HINT, "")) {
                     snprintf(r->text, sizeof r->text, "Click the name to pick another");
                 }
@@ -1583,20 +1727,194 @@ int curvetool_panel(panel_row *rows, int max)
             } else if (ROW(ROW_SEC_NONE, ROWK_HINT, "")) {
                 snprintf(r->text, sizeof r->text, "None saved yet: see the steps above");
             }
+            if (g_sec_deleted_n) {
+                static char undo_label[64];
+                snprintf(undo_label, sizeof undo_label, "Undo Delete Section (%d)", g_sec_deleted_n);
+                ROW(ROW_SEC_UNDO, ROWK_BUTTON, undo_label);
+            }
         }
     }
     if (g_mode == CURVE_MODE_PATH || g_mode == CURVE_MODE_PROFILE || g_dirty)
         ROW(ROW_SAVE, ROWK_BUTTON, g_dirty ? "Save Curves*" : "Save Curves");
+    if ((g_mode == CURVE_MODE_PATH || g_mode == CURVE_MODE_PROFILE) && (g_undo_n || g_redo_n)) {
+        static char undo_label[48], redo_label[48];
+        snprintf(undo_label, sizeof undo_label, "Undo Curve Edit (Ctrl+Z)  %d", g_undo_n);
+        snprintf(redo_label, sizeof redo_label, "Redo (Ctrl+Y)  %d", g_redo_n);
+        if (g_undo_n)
+            ROW(ROW_CURVE_UNDO, ROWK_BUTTON, undo_label);
+        if (g_redo_n)
+            ROW(ROW_CURVE_REDO, ROWK_BUTTON, redo_label);
+    }
 #undef ROW
     return n;
+}
+
+/* ── folding groups and scrolling lists ── */
+enum { MAX_FOLDS = 48, FOLD_KEY = 48 };
+static char g_folds[MAX_FOLDS][FOLD_KEY]; /* the folded groups, by header with its numbers taken out */
+static int g_fold_count, g_folds_read;
+static int g_row_head[MAX_PANEL_ROWS];          /* a shown row is a header a click folds */
+static int g_row_list[MAX_PANEL_ROWS];          /* a shown row's scrolling list, 0 = none */
+static char g_head_key[MAX_PANEL_ROWS][FOLD_KEY];
+static char g_head_label[MAX_PANEL_ROWS][72];
+static int g_list_first[PANEL_LISTS];
+
+/* "GRADIENT 12 OF 93" and "GRADIENT 3 OF 93" are the same group: the key drops digits. */
+static void fold_key(const char *text, char *key)
+{
+    int k = 0;
+    for (; *text && k < FOLD_KEY - 1; text++)
+        if (*text < '0' || *text > '9')
+            key[k++] = *text;
+    key[k] = 0;
+}
+static int fold_find(const char *key)
+{
+    for (int i = 0; i < g_fold_count; i++)
+        if (!strcmp(g_folds[i], key))
+            return i;
+    return -1;
+}
+static int folds_path(wchar_t *out, size_t cap)
+{
+    wchar_t dir[MAX_PATH];
+    return mx_data_dir(dir, MAX_PATH) && swprintf(out, cap, L"%ls\\panel-folds.txt", dir) > 0;
+}
+static void folds_read(void)
+{
+    g_folds_read = 1;
+    wchar_t path[MAX_PATH];
+    if (!folds_path(path, MAX_PATH))
+        return;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE)
+        return;
+    static char text[MAX_FOLDS * (FOLD_KEY + 2)];
+    DWORD got = 0;
+    ReadFile(f, text, sizeof text - 1, &got, NULL);
+    CloseHandle(f);
+    text[got] = 0;
+    for (char *line = strtok(text, "\r\n"); line && g_fold_count < MAX_FOLDS; line = strtok(NULL, "\r\n"))
+        if (line[0] && fold_find(line) < 0)
+            snprintf(g_folds[g_fold_count++], FOLD_KEY, "%s", line);
+}
+static void folds_write(void)
+{
+    wchar_t path[MAX_PATH];
+    if (!folds_path(path, MAX_PATH))
+        return;
+    static char text[MAX_FOLDS * (FOLD_KEY + 2)];
+    int n = 0;
+    for (int i = 0; i < g_fold_count; i++)
+        n += snprintf(text + n, sizeof text - n, "%s\r\n", g_folds[i]);
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE)
+        return;
+    DWORD put = 0;
+    WriteFile(f, text, (DWORD)n, &put, NULL);
+    CloseHandle(f);
+}
+static void fold_toggle(const char *key)
+{
+    int i = fold_find(key);
+    if (i >= 0) {
+        memmove(g_folds[i], g_folds[i + 1], (size_t)(g_fold_count - i - 1) * FOLD_KEY);
+        g_fold_count--;
+    } else if (g_fold_count < MAX_FOLDS) {
+        snprintf(g_folds[g_fold_count++], FOLD_KEY, "%s", key);
+    }
+    folds_write();
+}
+
+/* Takes the folded groups' rows out (a header stays, marked [+]; an open one [-]), packs the kinds and arguments down
+   with the rows, and hands over the first max_out. A row past them is cut off as before, but now only the groups the
+   user left open count. */
+static int fold_panel(int n, panel_row *out, int max_out)
+{
+    if (!g_folds_read)
+        folds_read();
+    if (max_out > MAX_PANEL_ROWS)
+        max_out = MAX_PANEL_ROWS;
+    int shown = 0, folded = 0;
+    for (int i = 0; i < n && shown < max_out; i++) {
+        panel_row row = g_all[i];
+        int head = row.kind == ROWK_HEADER;
+        if (head) {
+            const char *text = row.label && row.label[0] ? row.label : row.text;
+            if (!text[0]) {
+                head = 0; /* a blank header (a spacer) folds nothing */
+            } else {
+                fold_key(text, g_head_key[shown]);
+                folded = fold_find(g_head_key[shown]) >= 0;
+                snprintf(g_head_label[shown], sizeof g_head_label[shown], "%s %s", folded ? "[+]" : "[-]", text);
+                row.label = g_head_label[shown];
+            }
+        } else if (row.kind == ROWK_TITLE) {
+            folded = 0;
+        } else if (folded) {
+            continue;
+        }
+        out[shown] = row;
+        g_row_kind[shown] = g_row_kind[i], g_row_arg[shown] = g_row_arg[i]; /* shown <= i: packing down is safe */
+        g_row_head[shown] = head;
+        g_row_list[shown] = row.list;
+        shown++;
+    }
+    return shown;
+}
+
+int curvetool_header(int row) { return row >= 0 && row < MAX_PANEL_ROWS && g_row_head[row]; }
+
+void panel_list_range(int list, int count, int *first, int *last)
+{
+    int *f = list > 0 && list < PANEL_LISTS ? &g_list_first[list] : NULL;
+    int top = count > PANEL_LIST_SHOW ? count - PANEL_LIST_SHOW : 0;
+    int start = f ? *f : 0;
+    start = start < 0 ? 0 : start > top ? top : start;
+    if (f)
+        *f = start;
+    *first = start;
+    *last = start + PANEL_LIST_SHOW < count ? start + PANEL_LIST_SHOW : count;
+}
+void panel_list_show(int list, int index)
+{
+    if (list <= 0 || list >= PANEL_LISTS)
+        return;
+    if (index < g_list_first[list])
+        g_list_first[list] = index;
+    else if (index >= g_list_first[list] + PANEL_LIST_SHOW)
+        g_list_first[list] = index - PANEL_LIST_SHOW + 1;
+}
+const char *panel_list_more(int list, int up, int hidden)
+{
+    static char label[PANEL_LISTS][2][40];
+    int l = list > 0 && list < PANEL_LISTS ? list : 0;
+    snprintf(label[l][up != 0], sizeof label[l][0], up ? "^  %d more above" : "v  %d more below", hidden);
+    return label[l][up != 0];
+}
+static void list_scroll(int list, int by)
+{
+    if (list > 0 && list < PANEL_LISTS)
+        g_list_first[list] += by; /* panel_list_range clamps it on the next build */
+}
+int curvetool_wheel(int row, int notches)
+{
+    if (row < 0 || row >= MAX_PANEL_ROWS || !g_row_list[row] || !notches)
+        return 0;
+    list_scroll(g_row_list[row], -notches); /* the wheel away from you goes up the list */
+    return 1;
 }
 
 void curvetool_slide(int row, double value)
 {
     if (row < 0 || row >= MAX_PANEL_ROWS)
         return;
+    if (g_row_kind[row] >= STATUETOOL_ROW) {
+        statuetool_slide(g_row_kind[row], value);
+        return;
+    }
     if (g_row_kind[row] >= DECALTOOL_ROW)
-        return; /* the decal and statue rows have no sliders */
+        return; /* the decal rows have no sliders */
     if (g_row_kind[row] >= STAMPTOOL_ROW) {
         stamptool_slide(g_row_kind[row], value);
         return;
@@ -1700,10 +2018,241 @@ static void game_gradient_terrain(void)
     say_traced(line.points, &r);
 }
 
+/* ── undo for curve edits (Ctrl+Z, Ctrl+Y redo) ──
+   Each action (a press and drag on the map, a panel button, a key) takes a compact copy of every curve first: the
+   count, the selection, then each curve's header and only the points in use. When the action ends and the curves
+   differ from that copy (more than the selection), it goes on the undo list. Undo swaps the copy back in, and the
+   curves as they were go on redo. Cleared when the curves file is read again (another track, or the app rewrote it). */
+enum { CURVE_UNDO_KEEP = 64 };
+typedef struct {
+    unsigned char *bytes;
+    size_t len;
+} curve_snap;
+static curve_snap g_undo[CURVE_UNDO_KEEP], g_redo[CURVE_UNDO_KEEP];
+static int g_undo_n, g_redo_n;
+static curve_snap g_pending; /* taken when the outermost action began */
+static int g_act_depth;
+
+static curve_snap snap_take(void)
+{
+    curve_snap s = {NULL, 0};
+    size_t len = 2 * sizeof(int);
+    for (int i = 0; i < g_curves.count; i++)
+        len += 3 * sizeof(int) + (size_t)g_curves.c[i].anchors * sizeof(pen_anchor) +
+               (size_t)g_curves.c[i].points * sizeof(profile_point);
+    unsigned char *b = malloc(len), *at = b;
+    if (!b)
+        return s;
+#define PUT(src, n) (memcpy(at, (src), (n)), at += (n))
+    PUT(&g_curves.count, sizeof(int));
+    PUT(&g_selected, sizeof(int));
+    for (int i = 0; i < g_curves.count; i++) {
+        const curve *c = &g_curves.c[i];
+        PUT(&c->closed, sizeof(int));
+        PUT(&c->anchors, sizeof(int));
+        PUT(&c->points, sizeof(int));
+        PUT(c->a, (size_t)c->anchors * sizeof(pen_anchor));
+        PUT(c->p, (size_t)c->points * sizeof(profile_point));
+    }
+#undef PUT
+    s.bytes = b, s.len = len;
+    return s;
+}
+static int snap_put(const curve_snap *s)
+{
+    const unsigned char *at = s->bytes, *end = s->bytes + s->len;
+    int count = 0, selected = -1;
+#define GET(dst, n) (at + (n) <= end ? (memcpy((dst), at, (n)), at += (n), 1) : 0)
+    if (!GET(&count, sizeof(int)) || !GET(&selected, sizeof(int)) || count < 0 || count > CURVE_MAX)
+        return 0;
+    for (int i = 0; i < count; i++) {
+        curve *c = &g_curves.c[i];
+        if (!GET(&c->closed, sizeof(int)) || !GET(&c->anchors, sizeof(int)) || !GET(&c->points, sizeof(int)) ||
+            c->anchors < 0 || c->anchors > CURVE_MAX_ANCHORS || c->points < 0 || c->points > CURVE_MAX_POINTS ||
+            !GET(c->a, (size_t)c->anchors * sizeof(pen_anchor)) || !GET(c->p, (size_t)c->points * sizeof(profile_point)))
+            return 0;
+    }
+#undef GET
+    g_curves.count = count;
+    g_curves_gen++;
+    g_selected = selected >= 0 && selected < count ? selected : -1;
+    return 1;
+}
+static void snap_free(curve_snap *s)
+{
+    free(s->bytes);
+    s->bytes = NULL, s->len = 0;
+}
+static void snap_push(curve_snap *list, int *n, curve_snap s)
+{
+    if (*n == CURVE_UNDO_KEEP) {
+        snap_free(&list[0]);
+        memmove(&list[0], &list[1], (CURVE_UNDO_KEEP - 1) * sizeof list[0]);
+        (*n)--;
+    }
+    list[(*n)++] = s;
+}
+static void curve_undo_clear(void)
+{
+    while (g_undo_n)
+        snap_free(&g_undo[--g_undo_n]);
+    while (g_redo_n)
+        snap_free(&g_redo[--g_redo_n]);
+    snap_free(&g_pending);
+    g_act_depth = g_mouse_act = 0;
+}
+static void act_begin(void)
+{
+    if (g_act_depth++ == 0) {
+        snap_free(&g_pending);
+        g_pending = snap_take();
+    }
+}
+/* The same curves, maybe another one selected: a click that only picks a curve isn't an edit. */
+static int same_curves(const curve_snap *a, const curve_snap *b)
+{
+    size_t skip = 2 * sizeof(int);
+    return a->bytes && b->bytes && a->len == b->len && a->len >= skip && !memcmp(a->bytes, b->bytes, sizeof(int)) &&
+           !memcmp(a->bytes + skip, b->bytes + skip, a->len - skip);
+}
+static void act_end(void)
+{
+    if (g_act_depth <= 0 || --g_act_depth > 0 || !g_pending.bytes)
+        return;
+    curve_snap now = snap_take();
+    int same = same_curves(&now, &g_pending);
+    snap_free(&now);
+    if (same) {
+        snap_free(&g_pending);
+        return;
+    }
+    snap_push(g_undo, &g_undo_n, g_pending);
+    g_pending.bytes = NULL, g_pending.len = 0;
+    while (g_redo_n)
+        snap_free(&g_redo[--g_redo_n]);
+}
+static void curve_undo(int redo)
+{
+    curve_snap *from = redo ? g_redo : g_undo, *to = redo ? g_undo : g_redo;
+    int *from_n = redo ? &g_redo_n : &g_undo_n, *to_n = redo ? &g_undo_n : &g_redo_n;
+    if (!*from_n) {
+        say(redo ? "Nothing to redo." : "No curve edit to undo.");
+        return;
+    }
+    curve_snap now = snap_take();
+    curve_snap back = from[--(*from_n)];
+    if (!now.bytes || !snap_put(&back)) {
+        from[(*from_n)++] = back; /* kept, nothing changed */
+        snap_free(&now);
+        say("Couldn't undo that.");
+        return;
+    }
+    snap_free(&back);
+    snap_push(to, to_n, now);
+    g_dirty = 1;
+    g_drawing = 0, g_point = -1, g_drag.kind = DRAG_NONE;
+    g_rng_a = g_rng_b = -1, g_sec_start = g_sec_end = -1;
+    say(redo ? "Redone. Ctrl+Z undoes it again." : "Undone. Ctrl+Y redoes it.");
+}
+
+/* ── curves in the game's gradient group (gradtool.c) ──
+   Gradient Placement's group can hold curves as well as the game's gradients, so they move as one. A curve there is
+   its index, good while curvetool_curves_gen() stays the same. A group move is one curve undo step too (begin/end), so
+   Ctrl+Z in Curve Path doesn't skip back past it. */
+int curvetool_curves_gen(void) { return g_curves_gen; }
+int curvetool_curve_count(void) { return g_curves.count; }
+
+static double g_line_pts[CURVE_MAX_ANCHORS * 17][2];
+
+int curvetool_curve_line(int i, double (*out)[2], int max)
+{
+    if (i < 0 || i >= g_curves.count || g_curves.c[i].anchors < 2)
+        return 0;
+    return pen_points(&g_curves.c[i], 16, out, max);
+}
+
+/* The curve whose line is nearest (x, z) within reach ft, -1 if none; *dist how far. */
+int curvetool_curve_near(double x, double z, double reach, double *dist)
+{
+    int best = -1;
+    double best_d = reach;
+    for (int i = 0; i < g_curves.count; i++) {
+        int n = curvetool_curve_line(i, g_line_pts, CURVE_MAX_ANCHORS * 17);
+        for (int k = 0; k + 1 < n; k++) {
+            double ax = g_line_pts[k][0], az = g_line_pts[k][1], dx = g_line_pts[k + 1][0] - ax, dz = g_line_pts[k + 1][1] - az;
+            double run = dx * dx + dz * dz, t = run > 0 ? ((x - ax) * dx + (z - az) * dz) / run : 0;
+            t = t < 0 ? 0 : t > 1 ? 1 : t;
+            double d = hypot(x - (ax + t * dx), z - (az + t * dz));
+            if (d <= best_d)
+                best = i, best_d = d;
+        }
+    }
+    if (dist)
+        *dist = best_d;
+    return best;
+}
+
+/* Halfway along the curve, for the group's box. */
+int curvetool_curve_middle(int i, double *x, double *z)
+{
+    if (i < 0 || i >= g_curves.count || g_curves.c[i].anchors < 2)
+        return 0;
+    static const double half = 0.5;
+    double at[1][2];
+    if (!pen_spots(&g_curves.c[i], &half, 1, 1.0, at))
+        return 0;
+    *x = at[0][0], *z = at[0][1];
+    return 1;
+}
+
+/* Its first point, which a move shifts like every other: how the group's undo knows the curve is still where it left it. */
+int curvetool_curve_first(int i, double *x, double *z)
+{
+    if (i < 0 || i >= g_curves.count || g_curves.c[i].anchors < 1)
+        return 0;
+    *x = g_curves.c[i].a[0].x, *z = g_curves.c[i].a[0].z;
+    return 1;
+}
+
+/* Every point and handle moved by (dx, dz); the profile stays. Like the game's gradients, the ground doesn't change. */
+void curvetool_curve_shift(int i, double dx, double dz)
+{
+    if (i < 0 || i >= g_curves.count || (dx == 0 && dz == 0))
+        return;
+    curve *c = &g_curves.c[i];
+    for (int k = 0; k < c->anchors; k++)
+        pen_move_anchor(&c->a[k], c->a[k].x + dx, c->a[k].z + dz);
+    g_dirty = 1;
+    status_now();
+}
+
+void curvetool_group_move_begin(void) { act_begin(); }
+void curvetool_group_move_end(void) { act_end(); }
+
+static void press_inner(int row);
 void curvetool_press(int row)
+{
+    if (row >= 0 && row < MAX_PANEL_ROWS && (g_row_kind[row] == ROW_CURVE_UNDO || g_row_kind[row] == ROW_CURVE_REDO)) {
+        curve_undo(g_row_kind[row] == ROW_CURVE_REDO);
+        return;
+    }
+    act_begin();
+    press_inner(row);
+    act_end();
+}
+
+static void press_inner(int row)
 {
     if (row < 0 || row >= MAX_PANEL_ROWS)
         return;
+    if (g_row_head[row]) {
+        fold_toggle(g_head_key[row]);
+        return;
+    }
+    if (g_row_kind[row] == PANEL_LIST_UP || g_row_kind[row] == PANEL_LIST_DOWN) {
+        list_scroll(g_row_list[row], g_row_kind[row] == PANEL_LIST_UP ? -(PANEL_LIST_SHOW / 2) : PANEL_LIST_SHOW / 2);
+        return;
+    }
     if (g_row_kind[row] >= STATUETOOL_ROW) {
         statuetool_press(g_row_kind[row], g_row_arg[row]);
         return;
@@ -1722,7 +2271,12 @@ void curvetool_press(int row)
     }
     switch (g_row_kind[row]) {
     case ROW_BRUSH_SHAPE: g_brush_shape = (g_brush_shape + 1) % (BRUSH_TRIANGLE + 1); break;
-    case ROW_SEC_CHOICE: g_sec_list_open = !g_sec_list_open; break;
+    case ROW_GRID: g_grid = (g_grid + 1) % 6; break;
+    case ROW_SEC_CHOICE:
+        g_sec_list_open = !g_sec_list_open;
+        if (g_sec_list_open)
+            panel_list_show(PANEL_LIST_SECTIONS, g_sec_choice);
+        break;
     case ROW_SEC_ITEM:
         g_sec_choice = g_row_arg[row];
         g_sec_list_open = 0;
@@ -1735,6 +2289,18 @@ void curvetool_press(int row)
         say("Type a name: Enter keeps it, Esc cancels.");
         break;
     case ROW_SEC_KEEP: keep_typed(); break;
+    case ROW_SEC_UNDO:
+        if (g_sec_deleted_n) {
+            const char *why = library_insert(g_sec_deleted[g_sec_deleted_n - 1].at, &g_sec_deleted[g_sec_deleted_n - 1].s);
+            if (why) {
+                say(why);
+            } else {
+                g_sec_choice = g_sec_deleted[--g_sec_deleted_n].at;
+                g_sec_choice = g_sec_choice < library_count() ? g_sec_choice : library_count() - 1;
+                say("Section put back.");
+            }
+        }
+        break;
     case ROW_SEC_CANCEL: g_typing = 0; break;
     case ROW_SEC_CLEAR: g_sec_start = g_sec_end = -1; break;
     case ROW_SEC_START:
@@ -1748,6 +2314,11 @@ void curvetool_press(int row)
     case ROW_RESIZE: g_stretch = !g_stretch; break;
     case ROW_BAKE_AS: g_add = !g_add; break;
     case ROW_SUBMODE: g_limit = (g_limit + 1) % 3; break;
+    case ROW_BAKE_SIDE: g_bake_side = (g_bake_side + 1) % 3; break;
+    case ROW_EASE_PLAIN:
+        g_ease_plain = !g_ease_plain;
+        curve_ease_plain(g_ease_plain);
+        break;
     case ROW_SEGMENT:
         /* Writes to the picked point (the segment from it to the next one); with none picked only the widget changes. */
         if (g_selected >= 0 && g_point >= 0 && g_point < g_curves.c[g_selected].points) {
@@ -1786,6 +2357,7 @@ void curvetool_press(int row)
     case ROW_PRE_KEEP:
     case ROW_PRE_CANCEL:
     case ROW_PRE_DELETE:
+    case ROW_PRE_UNDO:
         if (g_row_kind[row] != ROW_PRE_RENAME && g_row_kind[row] != ROW_PRE_KEEP)
             g_typing = g_typing == TYPING_PRESET ? TYPING_NONE : g_typing;
         preset_press(g_row_kind[row], g_row_arg[row]);
@@ -1854,6 +2426,63 @@ static scene_item *add_points(scene *s, int kind, const double (*pts)[2], int n,
     s->points += n;
     it->count = n;
     return it;
+}
+
+
+/* ── the ground grid ──
+   Faint lines every Grid ft over the track (0 .. its size), under everything else we draw, kept off the game's left
+   panel. Every 100 ft (or every 5th line, for 50 and 100 ft grids) is brighter. Zoomed out so far that lines would be
+   under 8 px apart, it draws every 2nd, 5th or 10th line and the panel says so. */
+
+static void grid_scene(scene *s, const curve_view *v)
+{
+    g_grid_shown_ft = 0;
+    if (g_grid <= 0 || g_grid >= (int)(sizeof GRID_FT / sizeof GRID_FT[0]) || v->h <= 0 || !(v->view_ft > 0))
+        return;
+    game_map m;
+    if (!game_heights(&m) || m.width < 2 || !(m.cell_ft > 0))
+        return;
+    double size = (m.width - 1) * (double)m.cell_ft, px_per_ft = v->h / v->view_ft;
+    double step = GRID_FT[g_grid];
+    static const int MORE[] = {1, 2, 5, 10, 20, 50, 100};
+    int k = 0;
+    while (k < 6 && step * MORE[k] * px_per_ft < 8)
+        k++;
+    step *= MORE[k];
+    if (step * px_per_ft < 8)
+        return;
+    double major = step >= 50 ? step * 5 : 100;
+    /* What's on screen, in feet: from the game's panel edge (21.25 units) to the right edge, top to bottom. */
+    double left = (21.25 * v->h / 64.0 - v->w / 2.0) / v->h * v->view_ft + v->cx;
+    double right = (v->w / 2.0) / v->h * v->view_ft + v->cx;
+    double top = -0.5 * v->view_ft + v->cz, bottom = 0.5 * v->view_ft + v->cz;
+    double x0 = left > 0 ? left : 0, x1 = right < size ? right : size, z0 = top > 0 ? top : 0, z1 = bottom < size ? bottom : size;
+    if (x1 <= x0 || z1 <= z0)
+        return;
+    enum { MAX_LINES = 1200 };
+    static double minor_pts[MAX_LINES * 2][2], major_pts[MAX_LINES * 2][2];
+    int nmin = 0, nmaj = 0;
+    for (int axis = 0; axis < 2; axis++) {
+        double lo = axis ? z0 : x0, hi = axis ? z1 : x1;
+        for (double t = ceil(lo / step) * step; t <= hi + 1e-9; t += step) {
+            int is_major = fabs(t / major - floor(t / major + 0.5)) < 1e-6;
+            double (*pts)[2] = is_major ? major_pts : minor_pts;
+            int *n = is_major ? &nmaj : &nmin;
+            if (*n + 2 > MAX_LINES * 2)
+                continue;
+            if (axis == 0)
+                pts[*n][0] = t, pts[*n][1] = z0, pts[*n + 1][0] = t, pts[*n + 1][1] = z1;
+            else
+                pts[*n][0] = x0, pts[*n][1] = t, pts[*n + 1][0] = x1, pts[*n + 1][1] = t;
+            *n += 2;
+        }
+    }
+    static const float minor[4] = {1, 1, 1, 0.13f}, major_c[4] = {1, 1, 1, 0.3f};
+    if (nmin)
+        add_points(s, SCENE_SEGMENTS, (const double(*)[2])minor_pts, nmin, minor);
+    if (nmaj)
+        add_points(s, SCENE_SEGMENTS, (const double(*)[2])major_pts, nmaj, major_c);
+    g_grid_shown_ft = step;
 }
 
 static void add_ring(scene *s, double x, double z, float radius, float width, const float rgba[4])
@@ -2061,6 +2690,7 @@ void curvetool_scene(scene *out, const curve_view *v, double mpx, double mpy)
 {
     out->items = out->points = 0;
     out->tool[0] = 0;
+    grid_scene(out, v); /* first, so everything else is drawn over it */
     double mx = (mpx - v->w / 2) / v->h * v->view_ft + v->cx, mz = (mpy - v->h / 2) / v->h * v->view_ft + v->cz;
     for (int i = 0; i < g_curves.count; i++)
         if (i != g_selected)
@@ -2071,4 +2701,92 @@ void curvetool_scene(scene *out, const curve_view *v, double mpx, double mpy)
     range_scene(out);
     if (g_mode == CURVE_MODE_STAMP)
         stamptool_scene(out, mx, mz);
+}
+
+/* ── the curve tool's settings, kept between sessions ──
+   %LOCALAPPDATA%\MX Simulator\mxtools\curve-settings.txt, one "name value" a line. Read once at start; written when
+   they've stopped changing for half a second, so a slider drag doesn't write every frame. A missing or bad line leaves
+   that setting at its default. */
+static int settings_path(wchar_t *out, size_t cap)
+{
+    wchar_t dir[MAX_PATH];
+    return mx_data_dir(dir, MAX_PATH) && swprintf(out, cap, L"%ls\\curve-settings.txt", dir) > 0;
+}
+static void settings_now(double *v)
+{
+    v[0] = g_inner, v[1] = g_outer, v[2] = g_bank, v[3] = g_strength, v[4] = g_add, v[5] = g_limit, v[6] = g_stretch;
+    v[7] = g_granularity, v[8] = g_trace_fit, v[9] = g_grid, v[10] = g_bake_side, v[11] = g_ease_plain;
+}
+enum { SETTINGS_N = 12 };
+static const char *const SETTING_NAMES[SETTINGS_N] = {"inner", "outer", "bank", "strength", "bake_add", "submode",
+                                                     "path_stretch", "granularity", "terrain_fit", "grid", "bake_side",
+                                                     "ease_plain"};
+static double g_settings_saved[SETTINGS_N];
+static int g_settings_quiet = -1; /* frames since they last changed; -1 = nothing to write */
+
+static void settings_load(void)
+{
+    settings_now(g_settings_saved);
+    wchar_t path[MAX_PATH];
+    if (!settings_path(path, MAX_PATH))
+        return;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE)
+        return;
+    char text[1024];
+    DWORD got = 0;
+    ReadFile(f, text, sizeof text - 1, &got, NULL);
+    CloseHandle(f);
+    text[got] = 0;
+    for (char *line = strtok(text, "\r\n"); line; line = strtok(NULL, "\r\n")) {
+        char name[32];
+        double x;
+        if (sscanf(line, "%31s %lf", name, &x) != 2 || x != x)
+            continue;
+        if (!strcmp(name, "inner")) g_inner = clampd(x, 0, 50);
+        else if (!strcmp(name, "outer")) g_outer = clampd(x, 0.5, 100);
+        else if (!strcmp(name, "bank")) g_bank = clampd(x, -BANK_MAX, BANK_MAX);
+        else if (!strcmp(name, "strength")) g_strength = clampd(x, 0, 1);
+        else if (!strcmp(name, "bake_add")) g_add = x != 0;
+        else if (!strcmp(name, "submode")) g_limit = (int)clampd(x, 0, 2);
+        else if (!strcmp(name, "path_stretch")) g_stretch = x != 0;
+        else if (!strcmp(name, "granularity")) g_granularity = clampd(x, 0, 1);
+        else if (!strcmp(name, "terrain_fit")) g_trace_fit = clampd(x, 0.01, 1);
+        else if (!strcmp(name, "grid")) g_grid = (int)clampd(x, 0, 5);
+        else if (!strcmp(name, "bake_side")) g_bake_side = (int)clampd(x, 0, 2);
+        else if (!strcmp(name, "ease_plain")) g_ease_plain = x != 0;
+    }
+    curve_ease_plain(g_ease_plain);
+    if (g_inner > g_outer)
+        g_inner = g_outer;
+    settings_now(g_settings_saved);
+    mx_log("curve tool: settings read from curve-settings.txt");
+}
+
+static void settings_frame(void)
+{
+    double v[SETTINGS_N];
+    settings_now(v);
+    if (memcmp(v, g_settings_saved, sizeof v)) {
+        memcpy(g_settings_saved, v, sizeof v);
+        g_settings_quiet = 0; /* changed: wait for it to settle */
+        return;
+    }
+    if (g_settings_quiet < 0 || ++g_settings_quiet < 30)
+        return;
+    g_settings_quiet = -1;
+    wchar_t path[MAX_PATH], tmp[MAX_PATH];
+    if (!settings_path(path, MAX_PATH) || swprintf(tmp, MAX_PATH, L"%ls.tmp", path) <= 0)
+        return;
+    char text[1024];
+    int n = 0;
+    for (int i = 0; i < SETTINGS_N; i++)
+        n += snprintf(text + n, sizeof text - n, "%s %.17g\r\n", SETTING_NAMES[i], v[i]);
+    HANDLE f = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD put = 0;
+    int ok = f != INVALID_HANDLE_VALUE && WriteFile(f, text, (DWORD)n, &put, NULL) && put == (DWORD)n;
+    if (f != INVALID_HANDLE_VALUE)
+        CloseHandle(f);
+    if (!ok || !MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        mx_log("curve tool: couldn't write curve-settings.txt");
 }

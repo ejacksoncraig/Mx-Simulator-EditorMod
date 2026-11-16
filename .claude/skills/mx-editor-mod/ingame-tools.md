@@ -317,6 +317,10 @@ Results:
   (inner can't pass outer), Bank, Strength (sliders, stepped like the game's: `min + round((max - min) * t / step) *
   step` along the bar the slider draws), Bake As (Paint / Add), SubMode (none / raise / lower), and Live re-previews when
   any of them changes. Checked in the game: everything works and looks like the game's.
+  Later: Bank is -0.5..0.5 (0.39.2). A slider through zero snaps to 0 within 4 px of it (0.39.1), because 200 steps
+  on a narrower bar left 0 between two pixels. Bake Side (0.40.0): Both / Left / Right. `curve_paint` skips cells with
+  `side > inner` for Left and `side < -inner` for Right (0.40.1: the core between both inner lines stays, only the other side's fade goes), where side is the signed distance from `dx*oz - dz*ox` (positive =
+  right of the chord, looking start to end on the map, z down the screen). Not tried in the game.
   Widgets, verified by disassembly: choice `0x14001ed10(ch, on, pos, scale, 20, 0, 0.5)`, struct {label, options,
   count @+0x10, selected @+0x14, rect @+0x18} (40 bytes); slider `0x14001f130(sl, on, pos, scale, 20, 0, 0.5)`, struct
   {label, double value, step, min, max, rect @+0x28, bar x0, x1 @+0x38} (64 bytes); readout `0x14001e830(text,
@@ -629,3 +633,40 @@ gradient's line. The game's own button is untouched. **Terrain Fit (ft)**, defau
 - Checked outside the game (old vs new driver, synthetic ground, 2 ft cells, Fit 0.05): worst error 0.6-6.2 ft (0.6-3.5 ft within 4 ft of a lip or edge)
   became 0.05-0.25 ft, points 1.2-2x (34-71 vs 19-51). Flat ground, short paths, off-map paths and pure noise all
   give valid profiles; a zero-length path is refused. Not yet checked in the game.
+
+## 15. Folding groups and scrolling lists (mod 0.37.0, built 2026-11-12)
+
+- `curvetool_panel` builds every row into `g_all` (BUILD_ROWS = 160, kinds and args sized the same), then `fold_panel`
+  drops the rows under folded headers and packs rows, kinds and args down to the 40 shown. So folding frees rows.
+- A header (ROWK_HEADER with text) is clickable: `[-]` open, `[+]` folded, keyed by its text with digits taken out
+  ("GRADIENT 12 OF 93" = "GRADIENT 3 OF 93"). Kept in `mxtools\panel-folds.txt`, one key a line.
+- Headers have no widget rect, so `row_at_mouse` (ingame.c) finds a row by layout: row i's widget spans 0.5 + 1.5 i ..
+  1.5 + 1.5 i units down (M5's button measured 11..33 px at 22.5 px a unit). Not yet checked against a real rect.
+- Lists (sections, both preset lists, saved gradients) show PANEL_LIST_SHOW = 8 from `g_list_first[list]`, with
+  PANEL_LIST_UP / PANEL_LIST_DOWN rows (kinds 9000 / 9001, handled in `curvetool_press` before any tool's range) that
+  page by 4. Rows carry `panel_row.list`; the wheel over our panel scrolls the list under the mouse instead of zooming.
+
+## 16. Undo and remembered settings (mod 0.38.0, built 2026-11-12)
+
+- **Curve undo** (`curvetool.c`, the undo section before `curvetool_press`): `act_begin` / `act_end` wrap a map press
+  to its release (`curvetool_mouse`), each panel press and each key. The outermost begin takes a compact copy (count,
+  selection, each curve's header and its anchors and points in use); the end keeps it on the undo list only if the
+  curves differ beyond the selection. Ctrl+Z (char 26, or `z` with Ctrl held) / Ctrl+Y (25 or `y`) swap copies; `load()`
+  clears both lists. Checked natively (`undo_test.c` in the session scratchpad, 13 checks); not in the game yet.
+- **Undo Delete Section / Preset:** `library_insert` / `preset_insert` put the last 16 back at their old index.
+- **Settings:** `curve-settings.txt` ("name value" lines), read in `curvetool_start`, written 30 frames after the
+  values stop changing.
+- **Live Preview and the height range:** the first `live_cover` keeps `game_height_range`; each write records the range
+  after it; taking the preview off (cancel, before a save) sets it back, keeping any widening past what our last write
+  left (the game's own brush). Apply sets it back before its final write. The stamp (shelved) still doesn't.
+
+## 17. Ground grid and moving a whole gradient (mod 0.39.0, built 2026-11-12)
+
+- **Grid** (`grid_scene`, `curvetool.c`): drawn first in `curvetool_scene` as two SCENE_SEGMENTS items (minor alpha 0.13,
+  major 0.3), clipped to 0..(width - 1) * cell_ft and to the screen from the game's panel edge (21.25 units). Spacing
+  multiplied by 2, 5, 10... until lines are 8 px apart. `g_grid` is kept in `curve-settings.txt` ("grid", 0..5).
+- **Whole gradient move** (`gradtool.c`): `gradtool_down` from the key detour, Placement only (in Gradient Edit,
+  Shift+click is the range select on the graph). Nearest line within 8 px, the selected one winning a tie. Each move
+  writes start ends + mouse offset through `game_gradient_set_ends` (game.c: `list_editable` checks, then ax, az, bx, bz
+  in place); the game never saw the press, so its mouse flag stays clear. Undo finds the gradient by the ends the move
+  left, not its index. Not yet checked: whether Shift+click does anything of the game's own in Placement.

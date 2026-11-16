@@ -36,7 +36,7 @@
 #pragma once
 
 #define MXMOD_PROTOCOL_VERSION 1
-#define MXMOD_VERSION "0.36.2"
+#define MXMOD_VERSION "0.45.1"
 #define MXMOD_PIPE_NAME L"\\\\.\\pipe\\mxmod"
 
 #define MXMOD_MSG_HELLO 1

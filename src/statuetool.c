@@ -4,6 +4,8 @@
    - Ctrl+drag on empty ground draws a box; every statue inside joins the group.
    - A plain drag on a statue in the group moves the whole group by the mouse's offset. Each keeps its turn and its
      height above the ground (the game's update puts it back on the ground at the new spot).
+   - Duplicate Group (or d with the mouse on the map) copies every group statue with the game's own add, beside the group
+     or centred on the mouse; the group becomes the copies. Undo takes them back off the end of the list.
    - Snap Group to Gradient runs the game's own snap math (game_statue_snap, a copy of 1684 0xe4291) on each statue in
      the group against the selected gradient. Undo (the panel button or Ctrl+Z) puts a move or snap back, newest first.
    Other presses without Ctrl, and every other key, stay the game's. The group is indices into the game's list, so
@@ -20,10 +22,14 @@
 #define MAX_GROUP 4096
 #define MAX_UNDO 16
 #define PICK_MIN_PX 6.0 /* the pick radius is the game's u / 2, but never less than this on screen */
+#define COPY_SIDE_FT 10.0 /* Duplicate Group's button puts the copies this far along +x (Copy Gradient's 10 ft) */
 
-enum { ST_HEADER = STATUETOOL_ROW, ST_HINT, ST_LABEL, ST_SNAP, ST_CLEAR, ST_UNDO };
+enum { ST_HEADER = STATUETOOL_ROW, ST_HINT, ST_LABEL, ST_SNAP, ST_CLEAR, ST_UNDO, ST_COPY, ST_SCALE_BY, ST_SCALE, ST_REAL_SIZE };
 
-static char g_say[192];
+#define FILE_CAP 1024
+static double g_scale_pct = 110; /* Scale by (%): each press multiplies the statues' present size by this */
+
+static char g_say[512];
 static void say(const char *fmt, ...)
 {
     va_list ap;
@@ -50,17 +56,22 @@ static struct {
 } g_move;
 
 typedef struct {
-    const char *what; /* "Move" or "Snap", for the panel and the messages */
+    const char *what; /* "Move", "Snap" or "Copy", for the panel and the messages */
+    int copy_base;    /* Copy: the list's length before, so the copies are copy_base .. copy_base + n - 1 */
     int n;
     int *index;
     statue_pose *before, *after;
+    char **files; /* Scale: per statue its old mesh, old shape and new mesh (malloc'ed), 3 * n */
 } undo_step;
 static undo_step g_undo[MAX_UNDO];
 static int g_undo_n;
 
 static void undo_free(undo_step *u)
 {
-    free(u->index), free(u->before), free(u->after);
+    if (u->files)
+        for (int k = 0; k < 3 * u->n; k++)
+            free(u->files[k]);
+    free(u->index), free(u->before), free(u->after), free(u->files);
     memset(u, 0, sizeof *u);
 }
 
@@ -170,16 +181,27 @@ static int move_begin(double x, double z)
     return 1;
 }
 
+/* A plain press the game gets: on the next frame, if the game picked a statue near it, its texture name is shown. */
+static struct {
+    int on;
+    double x, z, r;
+} g_pick;
+
 int statuetool_down(double x, double z, int ctrl)
 {
-    if (!statuetool_active() || (!ctrl && g_group_n == 0))
+    if (!statuetool_active())
         return 0;
     double view_ft = 0;
     int h = 0;
     g_ft_per_px = ingame_view(&view_ft, &h) && h > 0 ? view_ft / h : 1;
-    int hit = statue_near(x, z, pick_radius(g_ft_per_px));
-    if (!ctrl)
-        return hit >= 0 && in_group(hit) >= 0 ? move_begin(x, z) : 0;
+    double r = pick_radius(g_ft_per_px);
+    int hit = statue_near(x, z, r);
+    if (!ctrl) {
+        if (hit >= 0 && in_group(hit) >= 0)
+            return move_begin(x, z);
+        g_pick.on = 1, g_pick.x = x, g_pick.z = z, g_pick.r = r;
+        return 0;
+    }
     if (hit < 0) {
         g_box.on = 1, g_box.x0 = g_box.x1 = x, g_box.z0 = g_box.z1 = z;
         return 1;
@@ -327,6 +349,220 @@ static void snap_group(void)
         say("Snapped %d statue%s to the gradient. Ctrl+Z undoes it.", u.n, u.n == 1 ? "" : "s");
 }
 
+/* Duplicate Group: a copy of every group statue (same object, turn and height above the ground), moved by (dx, dz), added
+   at the end of the list with the game's own add. The group becomes the copies, so a drag places them. */
+static void duplicate_group(double dx, double dz)
+{
+    if (g_group_n == 0) {
+        say("Ctrl+click statues (or Ctrl+drag a box) to make a group first.");
+        return;
+    }
+    if (statuetool_dragging()) {
+        say("Let go of the mouse button first.");
+        return;
+    }
+    const char *why = game_statue_editable();
+    if (!why && !game_statue_copies_known())
+        why = "This game version's statue copy isn't known to the mod.";
+    if (why) {
+        say("%s", why);
+        return;
+    }
+    undo_step u;
+    if (!undo_alloc(&u, "Copy", g_group_n)) {
+        say("Out of memory.");
+        return;
+    }
+    u.copy_base = game_statue_count();
+    const char *first_why = NULL;
+    for (int k = 0; k < g_group_n; k++) {
+        statue_pose p;
+        int got = -1;
+        if (!game_statue_pose(g_group[k], &p)) {
+            first_why = "A statue in the group isn't there any more.";
+            break;
+        }
+        first_why = game_statue_copy(g_group[k], (float)(p.x + dx), (float)(p.z + dz), p.rot, &got);
+        if (first_why || got != u.copy_base + u.n)
+            break; /* the copies must be one run at the end, so the undo can take them off */
+        u.index[u.n] = got;
+        game_statue_pose(got, &u.after[u.n]);
+        u.n++;
+    }
+    if (u.n)
+        game_statues_changed();
+    g_list_n = game_statue_count();
+    if (u.n == 0) {
+        undo_free(&u);
+        say("%s", first_why ? first_why : "The game didn't add the copies.");
+        return;
+    }
+    int asked = g_group_n;
+    memcpy(g_group, u.index, sizeof(int) * u.n);
+    g_group_n = u.n;
+    undo_push(&u);
+    if (u.n < asked)
+        say("Copied %d of %d statues (%s). The group is the copies; Ctrl+Z takes them off.", u.n, asked,
+            first_why ? first_why : "the game stopped");
+    else
+        say("Copied %d statue%s. The group is now the copies: drag a gold one to place them. Ctrl+Z takes them off.", u.n,
+            u.n == 1 ? "" : "s");
+}
+
+/* ── resizing (statuescale.c makes the files; the statue is pointed at them, keeping its index) ── */
+
+/* What Scale works on: the group, or the game's selected statue when there's no group. */
+static int scale_targets(const int **list)
+{
+    static int one;
+    if (g_group_n) {
+        *list = g_group;
+        return g_group_n;
+    }
+    one = game_statue_selected();
+    *list = &one;
+    return one >= 0;
+}
+
+static char *dup_str(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *p = malloc(n);
+    if (p)
+        memcpy(p, s, n);
+    return p;
+}
+
+/* by: times the present size (1.1 = 10% bigger), or 0 for back to the real size. */
+static void scale_statues(double by)
+{
+    const int *list;
+    int n = scale_targets(&list);
+    if (!n) {
+        say("Click a statue (or make a group) to resize first.");
+        return;
+    }
+    if (statuetool_dragging()) {
+        say("Let go of the mouse button first.");
+        return;
+    }
+    const char *why = game_statue_editable();
+    if (!why && !game_statue_copies_known())
+        why = "This game version's statue add isn't known to the mod.";
+    if (why) {
+        say("%s", why);
+        return;
+    }
+    undo_step u;
+    if (!undo_alloc(&u, "Size", n) || !(u.files = calloc((size_t)n * 3, sizeof(char *)))) {
+        undo_free(&u);
+        say("Out of memory.");
+        return;
+    }
+    static char mesh[FILE_CAP], shape[FILE_CAP], new_mesh[FILE_CAP], new_shape[FILE_CAP];
+    const char *first_why = NULL;
+    int failed = 0, same = 0;
+    double total = 1;
+    for (int k = 0; k < n; k++) {
+        int i = list[k];
+        if (!game_statue_files(i, mesh, shape, FILE_CAP)) {
+            failed++;
+            continue;
+        }
+        double f = by > 0 ? by : 1 / statuescale_factor(mesh);
+        why = statuescale_files(mesh, shape, f, new_mesh, new_shape, FILE_CAP, &total);
+        if (!why && _stricmp(new_mesh, mesh) == 0 && _stricmp(new_shape, shape) == 0) {
+            same++;
+            continue;
+        }
+        if (!why)
+            why = game_statue_set_files(i, new_mesh, new_shape[0] ? new_shape : NULL);
+        if (why) {
+            if (!first_why)
+                first_why = why;
+            failed++;
+            continue;
+        }
+        u.index[u.n] = i;
+        u.files[3 * u.n] = dup_str(mesh), u.files[3 * u.n + 1] = dup_str(shape), u.files[3 * u.n + 2] = dup_str(new_mesh);
+        u.n++;
+    }
+    if (u.n)
+        game_statues_changed();
+    if (u.n == 0) {
+        undo_free(&u);
+        if (same)
+            say(by > 0 ? "Already that size." : "Already at its real size.");
+        else
+            say("%s", first_why ? first_why : "None of them could be resized.");
+        return;
+    }
+    undo_push(&u);
+    char size[48];
+    if (n == 1)
+        snprintf(size, sizeof size, " (now %.4g%% of its real size)", total * 100);
+    else
+        size[0] = 0;
+    if (failed)
+        say("Resized %d statue%s%s; %d couldn't be: %s Ctrl+Z undoes it.", u.n, u.n == 1 ? "" : "s", size, failed,
+            first_why ? first_why : "not there any more.");
+    else if (by > 0)
+        say("Resized %d statue%s by %.4g%%%s. Press s to save. Ctrl+Z undoes it.", u.n, u.n == 1 ? "" : "s", by * 100, size);
+    else
+        say("%d statue%s back to real size. Ctrl+Z undoes it.", u.n, u.n == 1 ? "" : "s");
+}
+
+static void undo_scale(undo_step *u)
+{
+    static char mesh[FILE_CAP], shape[FILE_CAP];
+    int done = 0, changed = 0;
+    for (int k = u->n - 1; k >= 0; k--) {
+        /* Only a statue still on the files this step gave it. */
+        if (!game_statue_files(u->index[k], mesh, shape, FILE_CAP) || !u->files[3 * k + 2] ||
+            _stricmp(mesh, u->files[3 * k + 2]) != 0 || !u->files[3 * k]) {
+            changed++;
+            continue;
+        }
+        const char *old_shape = u->files[3 * k + 1] && u->files[3 * k + 1][0] ? u->files[3 * k + 1] : NULL;
+        if (!game_statue_set_files(u->index[k], u->files[3 * k], old_shape))
+            done++;
+        else
+            changed++;
+    }
+    if (done)
+        game_statues_changed();
+    if (changed)
+        say("Size undone for %d statues; %d had changed since, so they were left.", done, changed);
+    else
+        say("Size undone (%d statue%s).%s", done, done == 1 ? "" : "s", g_undo_n > 1 ? " Ctrl+Z again for the one before." : "");
+}
+
+/* Undoing a Copy: the copies come off the end of the list, newest first. Only while the list is as the copy left it. */
+static int undo_copy(undo_step *u)
+{
+    if (game_statue_count() != u->copy_base + u->n) {
+        say("The statue list changed since the copy, so it can't be taken off.");
+        return 0;
+    }
+    int done = 0;
+    const char *why = NULL;
+    for (int k = u->n - 1; k >= 0 && !why; k--)
+        if (!(why = game_statue_drop_last()))
+            done++;
+    if (done)
+        game_statues_changed();
+    g_list_n = game_statue_count();
+    /* The group was the copies (or some of them): what's left of it is whatever's still in the list. */
+    for (int k = g_group_n - 1; k >= 0; k--)
+        if (g_group[k] >= g_list_n)
+            group_remove(g_group[k]);
+    if (why)
+        say("Took off %d of %d copies (%s).", done, u->n, why);
+    else
+        say("Copy undone (%d statue%s taken off).%s", done, done == 1 ? "" : "s", g_undo_n > 1 ? " Ctrl+Z again for the one before." : "");
+    return 1;
+}
+
 static void undo(void)
 {
     if (g_undo_n == 0) {
@@ -343,6 +579,15 @@ static void undo(void)
         return;
     }
     undo_step *u = &g_undo[g_undo_n - 1];
+    if (strcmp(u->what, "Copy") == 0 || strcmp(u->what, "Size") == 0) {
+        if (u->files)
+            undo_scale(u);
+        else
+            undo_copy(u);
+        undo_free(u);
+        g_undo_n--;
+        return;
+    }
     int done = 0, moved = 0;
     for (int k = u->n - 1; k >= 0; k--) {
         statue_pose now;
@@ -364,12 +609,42 @@ static void undo(void)
         say("%s undone (%d statue%s).%s", what, done, done == 1 ? "" : "s", g_undo_n ? " Ctrl+Z again for the one before." : "");
 }
 
-int statuetool_key(int key, int ctrl)
+/* The group's centre: the middle of its statues' centres. */
+static int group_centre(double *cx, double *cz)
+{
+    double sx = 0, sz = 0;
+    int got = 0;
+    for (int k = 0; k < g_group_n; k++) {
+        statue_pose p;
+        if (game_statue_pose(g_group[k], &p))
+            sx += p.x, sz += p.z, got++;
+    }
+    if (!got)
+        return 0;
+    *cx = sx / got, *cz = sz / got;
+    return 1;
+}
+
+int statuetool_key(int key, int ctrl, double mouse_x, double mouse_z)
 {
     if (!statuetool_active())
         return 0;
     if (g_undo_n && (key == 26 || (ctrl && (key == 'z' || key == 'Z')))) {
         undo();
+        return 1;
+    }
+    /* d with a group copies the group, centred on the mouse (the game's d copies its one statue to the mouse). */
+    if (key == 'd' && !ctrl && g_group_n && game_statue_copies_known()) {
+        double cx, cz;
+        if (!group_centre(&cx, &cz))
+            say("The group's statues aren't there any more. Clear the group and pick again.");
+        else
+            duplicate_group(mouse_x - cx, mouse_z - cz);
+        return 1;
+    }
+    /* g with a group: Snap Group to Gradient (s is the game's save, and the game's handler has no g). */
+    if ((key == 'g' || key == 'G') && !ctrl && g_group_n) {
+        snap_group();
         return 1;
     }
     return 0;
@@ -393,6 +668,16 @@ void statuetool_frame(void)
         undo_clear();
     }
     g_list_n = n;
+    if (g_pick.on) {
+        /* The game has had the press: say what it picked (only a statue by the press, not an older selection). */
+        g_pick.on = 0;
+        int sel = game_statue_selected();
+        statue_pose p;
+        if (sel >= 0 && game_statue_pose(sel, &p) && hypot(p.x - g_pick.x, p.z - g_pick.z) <= g_pick.r * 1.01) {
+            const char *name = game_statue_texture(sel);
+            say("Statue %d of %d: %s", sel + 1, n, name ? name : "no texture");
+        }
+    }
 }
 
 /* ── the panel ── */
@@ -416,6 +701,8 @@ int statuetool_rows(panel_row *rows, int max, int *kinds, int *args)
         snprintf(r->text, sizeof r->text, g_group_n == 1 ? "1 statue in the group" : "%d statues in the group", g_group_n);
     if (g_group_n) {
         ROW(ST_SNAP, ROWK_BUTTON, "Snap Group to Gradient");
+        if (game_statue_copies_known())
+            ROW(ST_COPY, ROWK_BUTTON, "Duplicate Group");
         ROW(ST_CLEAR, ROWK_BUTTON, "Clear Group");
     }
     if (g_undo_n) {
@@ -433,8 +720,37 @@ int statuetool_rows(panel_row *rows, int max, int *kinds, int *args)
         snprintf(r->text, sizeof r->text, "Ctrl+drag: box around statues");
     if (g_group_n && ROW(ST_HINT, ROWK_HINT, ""))
         snprintf(r->text, sizeof r->text, "Drag a gold statue: move the group");
+    if (g_group_n && ROW(ST_HINT, ROWK_HINT, ""))
+        snprintf(r->text, sizeof r->text, "g: snap the group to the gradient");
+    if (g_group_n && game_statue_copies_known() && ROW(ST_HINT, ROWK_HINT, ""))
+        snprintf(r->text, sizeof r->text, "d: copy the group to the mouse");
     if (g_group_n && game_selected_gradient() < 0 && ROW(ST_HINT, ROWK_HINT, ""))
         snprintf(r->text, sizeof r->text, "Pick a gradient in Placement first");
+
+    /* Resizing: the group, or the game's selected statue without one. */
+    const int *list = NULL;
+    int targets = game_statue_copies_known() ? scale_targets(&list) : 0;
+    ROW(ST_HEADER, ROWK_HEADER, "STATUE SIZE");
+    if (!targets) {
+        if (ROW(ST_HINT, ROWK_HINT, ""))
+            snprintf(r->text, sizeof r->text, game_statue_copies_known() ? "Click a statue or make a group" : "Not ported to this game build yet");
+    } else {
+        /* The first one's size against its original; read from disk only when its mesh changes. */
+        static char seen[FILE_CAP], shape[FILE_CAP], mesh[FILE_CAP];
+        static double factor = 1;
+        if (game_statue_files(list[0], mesh, shape, FILE_CAP) && strcmp(mesh, seen) != 0) {
+            memcpy(seen, mesh, sizeof seen);
+            factor = mesh[0] ? statuescale_factor(mesh) : 1;
+        }
+        if (ROW(ST_LABEL, ROWK_LABEL, ""))
+            snprintf(r->text, sizeof r->text, "%s%.4g%% of real size", targets > 1 ? "First: " : "Now ", factor * 100);
+        if (ROW(ST_SCALE_BY, ROWK_SLIDER, "Scale by (%)"))
+            r->value = g_scale_pct, r->min = 10, r->max = 300, r->step = 5;
+        ROW(ST_SCALE, ROWK_BUTTON, targets > 1 ? "Scale Group" : "Scale Statue");
+        ROW(ST_REAL_SIZE, ROWK_BUTTON, "Real Size");
+        if (ROW(ST_HINT, ROWK_HINT, ""))
+            snprintf(r->text, sizeof r->text, "Each about its own centre");
+    }
 #undef ROW
     return n;
 }
@@ -444,6 +760,7 @@ void statuetool_press(int kind, int arg)
     (void)arg;
     switch (kind) {
     case ST_SNAP: snap_group(); break;
+    case ST_COPY: duplicate_group(COPY_SIDE_FT, 0); break; /* the mouse is on the panel: beside the group instead */
     case ST_CLEAR:
         if (statuetool_dragging())
             break;
@@ -451,7 +768,15 @@ void statuetool_press(int kind, int arg)
         say("Group cleared.");
         break;
     case ST_UNDO: undo(); break;
+    case ST_SCALE: scale_statues(g_scale_pct / 100); break;
+    case ST_REAL_SIZE: scale_statues(0); break;
     }
+}
+
+void statuetool_slide(int kind, double value)
+{
+    if (kind == ST_SCALE_BY && value >= 10 && value <= 300)
+        g_scale_pct = value;
 }
 
 /* ── on the map ── */

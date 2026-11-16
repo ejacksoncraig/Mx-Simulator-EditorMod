@@ -211,6 +211,23 @@ const char *library_delete(int i)
     return NULL;
 }
 
+/* A deleted section put back at its old place (Undo Delete Section). */
+const char *library_insert(int i, const section *s)
+{
+    if (library_count() >= SECTION_MAX)
+        return "The section library is full; delete one first.";
+    i = i < 0 ? 0 : i > g_count ? g_count : i;
+    memmove(&g_sections[i + 1], &g_sections[i], (size_t)(g_count - i) * sizeof g_sections[0]);
+    g_sections[i] = *s;
+    g_count++;
+    if (!save()) {
+        memmove(&g_sections[i], &g_sections[i + 1], (size_t)(g_count - i - 1) * sizeof g_sections[0]);
+        g_count--;
+        return "Couldn't write the section library.";
+    }
+    return NULL;
+}
+
 /* The section laid onto a profile from point `at`: its first point there (at that point's height), the points it
    covers replaced, the rest kept. The profile's length doesn't change. The new count, or -1 and *why. */
 int section_paste(const profile_point *p, int n, int at, const section *s, int room, profile_point *out, const char **why)

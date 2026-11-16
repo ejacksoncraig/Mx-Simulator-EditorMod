@@ -46,3 +46,39 @@ length changes. Not tried in the game yet.
 its own one-statue drag; the drag writes start pose + mouse offset to every member through `game_statue_set_pose`
 (x, z, rot, then 0x41110, which keeps the +0x28 ground offset). The release makes one "Move" undo step. Writes go
 ahead mid-drag because the game never saw the press, so its mouse-down flag stays clear.
+
+## 5. Where a statue's file names are (1684, read 2026-11-12 from the statues writer; not used by the mod yet)
+The writer (`lea` of `"[%f %f %f] %f %s %s %s"` at **0x4a4db**, loop 0x4a4f0..0x4a59f, `fprintf`-like 0x8d350) builds
+each line from the record:
+- **+0x00 mesh**: a pointer; the name is `*(char **)mesh` (getter 0xf0760 is `mov rax, [rcx]; ret`). Null -> "null".
+- **+0x08 shape**: a pointer; the name is `*(char **)shape` (getter 0x77a80, the same one instruction). Null -> "null".
+- **+0x10 texture**: an int id; 0x87040(id) walks the texture table (count `[0x40fcb3c]`, stride and pointer beside
+  it) for the entry whose first int is the id and returns entry + 0x18, an inline name. 0 (not found) -> "null".
+- The line's order is mesh (+0x00), texture (+0x10), shape (+0x08): x +0x1c, y offset +0x28, z +0x24, rot +0x2c.
+- The writer reads the list from globals at **0x1ec5a48** (ptr), +0x50 cap, **0x1ec5a54** count, **0x1ec5a58** stride,
+  and starts at the index in **0x1ec5a60**, not 0 (probably the timing gate's statues come first and aren't saved;
+  unverified). 0x1ec5a48 - 0x23888 = 0x1ea21c0, so the window struct is likely that static (unverified).
+
+## 6. Copying and deleting (1684, read 2026-11-15; used by mod 0.43.0's Duplicate Group)
+- **`d`** in Statues mode (key handler 0xec1f7): needs the edit lock clear and a selected statue. It reads that record's
+  names (mesh `*(char **)[+0x00]`, shape `*(char **)[+0x08]`, texture `0x87040([+0x10])`), then calls
+  **`0x41430(float x, float y_offset, float z, float rot, mesh, texture, shape)`** with the mouse's world x/z, the
+  record's +0x28 and +0x2c. That's the loader's own add: it loads the files by name, puts the record's +0x20 at
+  ground (0x173b0) + offset, builds the turn matrix, **appends** to the list (the static vector at 0x1ec5a48, the same
+  one the window struct holds at +0x23888) and returns count - 1. Then **`0x34e30()`** (no arguments; it zeroes a run
+  of globals, probably the statue draw bins) and `terrain+0x49570 = 7`. Null names pass as NULL.
+- **Del / x** (0xec35e): the first statue within the pick radius of the mouse, from index `[window+0x238a0]` on.
+  **`0x4a390(record)`** frees what the record owns (+0x08 shape, +0x60, +0x68, +0x70); if it was the last one the count
+  just drops by 1, otherwise 0xec6c7 shifts the rest down (not read). Then 0x34e30 and modified = 7. The selection isn't
+  touched.
+- The mod's copy (`game_statue_copy`, `game_statue_drop_last`, `game_statues_changed` in `src/game.c`) does the same
+  calls; its undo only ever removes from the end, so no other statue's index moves. Not tried in the game yet.
+- **Names on click (mod 0.44.0):** `0x87040(id)` also names decals: the decals writer (loop at 0xf910) calls it on the
+  record's +0x00 colour id (it skips a decal whose id equals `terrain+0x4952c`). The mod shows the name for a decal
+  pick and for a statue the game selected by a plain click (`game_texture_name`, `game_statue_texture`).
+- **Files made while the game runs (1684):** an `@` path is opened by 0x8d450, which tries each search folder
+  (0x8a1a0(i)) with a plain open (0x8a6f0) first, and only then `.gz` / `.scram` and the `.saf` file index (built once,
+  0x8db70: "Listing directories", "Listing archives", "File index complete"). So a loose file written after startup is
+  found; one inside a .saf isn't readable as a loose file. Mod 0.45.0's STATUE SIZE relies on this (`src/statuescale.c`),
+  and points a statue at new files with `game_statue_set_files`: add with the new names, swap the two records, take
+  the old one off the end (0x4a390, count - 1), then 0x34e30. Not tried in the game yet.

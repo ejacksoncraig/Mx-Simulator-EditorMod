@@ -1,5 +1,6 @@
 /* Baking a curve into the ground: core/curved.py paint_curve (and gradient.py brush_weight), line for line, including
-   its float32 working arrays (nearest distance, distance along, side) so the heights match the app's. No game calls. */
+   its float32 working arrays (nearest distance, distance along, side) so the heights match the app's, except for
+   easing plain points (eased, below), which the app doesn't do yet. No game calls. */
 #include "curvetool.h"
 
 #include <float.h>
@@ -34,10 +35,83 @@ static void keep(void *ctx, double x, double z, double along)
     c->n++;
 }
 
+/* Easing plain points (on unless turned off; the app doesn't do this yet, so with it on the two bake differently).
+   A plain point has handles of zero length, so where the next segment bends away the path leaves it at zero speed
+   and turns almost on the spot (a radius of a few inches), which shows as a notch across the inside of a jump where a
+   straight runs into a bend. For the bake only, a plain handle at a point where the path carries on within
+   EASE_MAX_DEG of straight gets a short handle along the path (EASE_HANDLE of the way to that side's neighbour), so
+   it turns over a few feet instead. Sharper corners stay sharp, the drawn line is unchanged, and the bake's line moves
+   well under a foot near such a point (0.6 ft on the case it was tuned on). */
+#define EASE_MAX_DEG 30.0
+#define EASE_HANDLE 0.1
+
+static int g_ease_plain = 1;
+void curve_ease_plain(int on) { g_ease_plain = on != 0; }
+
+static int unit_dir(double dx, double dz, double *ux, double *uz)
+{
+    double l = hypot(dx, dz);
+    if (!(l > 1e-9))
+        return 0;
+    *ux = dx / l, *uz = dz / l;
+    return 1;
+}
+
+/* The curve the bake uses: c itself, or an eased copy (only the path; no profile). Game thread only. */
+static const curve *eased(const curve *c)
+{
+    static curve e;
+    int n = c->anchors, changed = 0;
+    if (!g_ease_plain || n < 3)
+        return c;
+    e.closed = c->closed, e.anchors = n, e.points = 0;
+    memcpy(e.a, c->a, (size_t)n * sizeof c->a[0]);
+    double most = cos(EASE_MAX_DEG * 3.14159265358979323846 / 180);
+    for (int i = 0; i < n; i++) {
+        int closed = c->closed && n > 2;
+        if (!closed && (i == 0 || i == n - 1))
+            continue; /* an open end has no neighbour on one side */
+        const pen_anchor *a = &c->a[i], *prev = &c->a[(i + n - 1) % n], *next = &c->a[(i + 1) % n];
+        int in_plain = a->ix == a->x && a->iz == a->z, out_plain = a->ox == a->x && a->oz == a->z;
+        if (!in_plain && !out_plain)
+            continue;
+        /* The way the path arrives at a (and leaves it): its own handle if it has one, else toward the neighbour's
+           nearer handle, else the neighbour itself. */
+        double ix, iz, ox, oz;
+        if (!(unit_dir(a->x - a->ix, a->z - a->iz, &ix, &iz) || unit_dir(a->x - prev->ox, a->z - prev->oz, &ix, &iz) ||
+              unit_dir(a->x - prev->x, a->z - prev->z, &ix, &iz)))
+            continue;
+        if (!(unit_dir(a->ox - a->x, a->oz - a->z, &ox, &oz) || unit_dir(next->ix - a->x, next->iz - a->z, &ox, &oz) ||
+              unit_dir(next->x - a->x, next->z - a->z, &ox, &oz)))
+            continue;
+        double tx, tz;
+        if (ix * ox + iz * oz < most || !unit_dir(ix + ox, iz + oz, &tx, &tz))
+            continue; /* a real corner: kept sharp */
+        if (out_plain) {
+            double reach = hypot(next->x - a->x, next->z - a->z) * EASE_HANDLE;
+            e.a[i].ox = a->x + tx * reach, e.a[i].oz = a->z + tz * reach;
+        }
+        if (in_plain) {
+            double reach = hypot(a->x - prev->x, a->z - prev->z) * EASE_HANDLE;
+            e.a[i].ix = a->x - tx * reach, e.a[i].iz = a->z - tz * reach;
+        }
+        changed = 1;
+    }
+    return changed ? &e : c;
+}
+
 static int path_of(const curve *c, double cell, chords *out)
 {
     memset(out, 0, sizeof *out);
-    pen_sample(c, cell > MIN_CHORD_FT ? cell : MIN_CHORD_FT, keep, out);
+    double step = cell > MIN_CHORD_FT ? cell : MIN_CHORD_FT;
+    const curve *use = eased(c);
+    double length = pen_sample(use, step, keep, out);
+    if (use != c && out->n && length > 0) {
+        /* The profile was made to the drawn line's length: spread it over the eased one the same way. */
+        double scale = pen_sample(c, step, NULL, NULL) / length;
+        for (int i = 0; i < out->n; i++)
+            out->along[i] *= scale;
+    }
     return out->n;
 }
 
@@ -76,7 +150,7 @@ static double brush_weight(double distance, double inner, double outer)
 }
 
 int curve_paint(double *grid, int at_row, int at_col, int rows, int cols, int width, double cell, const curve *c, double inner,
-                double outer, double strength, int add, int limit, double bank, int out_bounds[4])
+                double outer, double strength, int add, int limit, double bank, int bake_side, int out_bounds[4])
 {
     if (!(outer > 0) || inner < 0 || c->anchors < 2)
         return 0;
@@ -133,6 +207,11 @@ int curve_paint(double *grid, int at_row, int at_col, int rows, int cols, int wi
         for (int col = 0; col < w; col++) {
             size_t k = (size_t)r * w + col;
             if (!isfinite(nearest[k]))
+                continue;
+            /* One side only: side > 0 is right of the curve, looking from its start to its end on the map. The
+               full-height core between the two inner lines is kept; only the other side's fade (inner to outer) is
+               left out, so that side ends in a hard edge at its inner line. */
+            if ((bake_side == CURVE_SIDE_LEFT && side[k] > inner) || (bake_side == CURVE_SIDE_RIGHT && side[k] < -inner))
                 continue;
             double gap = nearest[k];
             double weight = outer > inner ? brush_weight(gap, inner, outer) : (gap <= outer ? 1 : 0);

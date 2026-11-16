@@ -80,6 +80,13 @@ typedef struct {
     uint32_t rva_selected_statue;  /* int: Statues mode's selected statue, -1 none */
     uint32_t rva_statue_update;    /* void (statue *): y from the ground + offset, and the turn matrix, from x, z, rot */
     unsigned char statue_sig[16];  /* rva_statue_update's first 16 bytes */
+    /* Copying and removing statues (the game's `d` and Del in Statues mode). 0 = not ported. */
+    uint32_t rva_statue_add;      /* int (float x, float y_offset, float z, float rot, mesh, texture, shape names): appends
+                                     a statue the way the track loader does, returns its index */
+    uint32_t rva_statue_free;     /* void (statue *): frees what a record owns, before the list drops it */
+    uint32_t rva_statues_changed; /* void (void): the game calls it after every add or delete */
+    uint32_t rva_texture_name;    /* const char *(int id): a texture's name, NULL if not found */
+    unsigned char statue_add_sig[4][16]; /* add, free, changed, texture name */
 } mx_build;
 
 extern const mx_build *g_build; /* the running one; NULL until game.c finds it */

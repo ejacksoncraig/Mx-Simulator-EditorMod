@@ -57,6 +57,7 @@ into a log line.
 
 ## Where to read next
 
+- [FEATURES.md](FEATURES.md): everything the mod does, in one short list.
 - [DEVELOPERS.md](DEVELOPERS.md): a one-page brief on how it works and how another mod can run alongside it.
 - [docs/builds.md](docs/builds.md): the game builds the mod knows and how their addresses were found.
 - [.claude/skills/mx-editor-mod/](.claude/skills/mx-editor-mod/SKILL.md): for whoever maintains the mod. A Claude Code

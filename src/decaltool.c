@@ -29,7 +29,7 @@
 
 enum { DT_HEADER = DECALTOOL_ROW, DT_HINT, DT_LABEL, DT_BIGGER, DT_SMALLER, DT_DELETE, DT_UNDO };
 
-static char g_say[192];
+static char g_say[512];
 static void say(const char *fmt, ...)
 {
     va_list ap;
@@ -351,8 +351,11 @@ int decaltool_down(double x, double z, double ft_per_px, int shift, int alt)
     game_decal_select(pick);
     int n;
     const game_decal *list = game_decal_list(&n);
-    if (list && pick < n)
-        say("Decal %d of %d picked: %.2f x %.2f ft.", pick + 1, n, list[pick].size * list[pick].f5, list[pick].size);
+    if (list && pick < n) {
+        const char *name = game_texture_name(list[pick].tex);
+        say("Decal %d of %d: %s, %.2f x %.2f ft.", pick + 1, n, name ? name : "(name unknown)",
+            list[pick].size * list[pick].f5, list[pick].size);
+    }
     return 1;
 }
 

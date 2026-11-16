@@ -12,7 +12,7 @@
 
 static const char *const KIND_KEYS[PRESET_KINDS] = {"curve", "brush"};
 static const char *const FIELDS[PRESET_KINDS][PRESET_FIELDS] = {
-    {"inner", "outer", "bank", "strength", "add", "limit"},
+    {"inner", "outer", "bank", "strength", "add", "limit", "bakeSide"},
     {"outerFt", "innerFt", "shape", "angle", "oval", "sweep", "side", "triWidth", "triLean"},
 };
 static preset g_presets[PRESET_KINDS][PRESET_MAX];
@@ -191,6 +191,26 @@ const char *preset_rename(int kind, int i, const char *name)
     snprintf(p->name, sizeof p->name, "%s", name);
     if (!save()) {
         memcpy(p->name, old, sizeof old);
+        return "Couldn't write the presets file.";
+    }
+    return NULL;
+}
+
+/* A deleted preset put back at its old place (Undo Delete Preset). */
+const char *preset_insert(int kind, int i, const preset *p)
+{
+    if (!valid_kind(kind))
+        return "No such preset list.";
+    if (preset_count(kind) >= PRESET_MAX)
+        return "The preset list is full; delete one first.";
+    preset *list = g_presets[kind];
+    i = i < 0 ? 0 : i > g_count[kind] ? g_count[kind] : i;
+    memmove(&list[i + 1], &list[i], (size_t)(g_count[kind] - i) * sizeof list[0]);
+    list[i] = *p;
+    g_count[kind]++;
+    if (!save()) {
+        memmove(&list[i], &list[i + 1], (size_t)(g_count[kind] - i - 1) * sizeof list[0]);
+        g_count[kind]--;
         return "Couldn't write the presets file.";
     }
     return NULL;
