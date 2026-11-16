@@ -1422,22 +1422,14 @@ static float snap_yaw(double angle, float old_rot)
    distance from A and s* the profile s nearest d (0 to start with; ties keep the earlier). If the line A-B (extended) is
    farther than |s* - d|, the statue slides along A->statue to s* from A, turned tangent to that ring; otherwise it goes
    to its projection on the line, turned along it. Turning is skipped when rot >= 3.25. */
-const char *game_statue_snap(int i)
+static const char *snap_math(float sx, float sz, float rot, float *out_x, float *out_z, float *out_rot)
 {
-    const char *why = game_statue_editable();
-    if (why)
-        return why;
     gradient_info gi;
     if (!read_gradients(&gi))
         return "The game's gradients couldn't be read.";
     if (gi.selected < 0 || gi.selected >= gi.count)
         return "Pick a gradient first (in Gradient Placement or Edit).";
     const game_gradient *g = &gi.list[gi.selected];
-    int n;
-    uintptr_t s = statue_at(i, &n);
-    if (!s)
-        return "That statue isn't there any more.";
-    float sx = *(float *)(s + S_X), sz = *(float *)(s + S_Z), rot = *(float *)(s + S_ROT);
     float ax = g->ax, az = g->az, dx = sx - ax, dz = sz - az;
     float d = (float)sqrt((double)(dz * dz + dx * dx));
     float best = 0, diff = 0 - d;
@@ -1465,6 +1457,29 @@ const char *game_statue_snap(int i)
     }
     if (!(nx > -1e6f && nx < 1e6f && nz > -1e6f && nz < 1e6f && nrot > -1e3f && nrot < 1e3f))
         return "A statue sits right on the gradient's A, so it has no direction to snap in.";
+    *out_x = nx, *out_z = nz, *out_rot = nrot;
+    return NULL;
+}
+
+/* Where Snap to Gradient would put a statue at (x, z) turned rot, without moving anything: for a linked piece, whose
+   middle is snapped and whose parts then follow it as one. */
+const char *game_snap_point(float x, float z, float rot, float *nx, float *nz, float *nrot)
+{
+    return snap_math(x, z, rot, nx, nz, nrot);
+}
+
+const char *game_statue_snap(int i)
+{
+    const char *why = game_statue_editable();
+    if (why)
+        return why;
+    int n;
+    uintptr_t s = statue_at(i, &n);
+    if (!s)
+        return "That statue isn't there any more.";
+    float nx, nz, nrot;
+    if ((why = snap_math(*(float *)(s + S_X), *(float *)(s + S_Z), *(float *)(s + S_ROT), &nx, &nz, &nrot)) != NULL)
+        return why;
     if (g_readonly) {
         mx_log("READONLY: would snap statue %d to (%.3f, %.3f) rot %.4f", i, nx, nz, nrot);
         return NULL;
@@ -1677,6 +1692,23 @@ const char *game_statue_texture(int i)
     int n;
     uintptr_t s = statue_at(i, &n);
     return s ? game_texture_name(*(uint32_t *)(s + 0x10)) : NULL;
+}
+
+/* Every statue's mark in one pass (statue_at checks the whole list is readable once, not once per statue). */
+int game_statue_marks(statue_mark *out, int max)
+{
+    int n;
+    uintptr_t first = statue_at(0, &n), w = 0;
+    if (n <= 0 || !first || !read_ptr(g_base + g_build->rva_ptr_window, &w) || !w)
+        return 0;
+    size_t stride = (size_t)((const game_vector *)(w + g_build->statue_list))->stride;
+    for (int i = 0; i < n && i < max; i++) {
+        uintptr_t s = first + (size_t)i * stride;
+        out[i].mesh = *(uintptr_t *)s, out[i].tex = *(uint32_t *)(s + 0x10);
+        out[i].x = *(float *)(s + S_X), out[i].z = *(float *)(s + S_Z), out[i].rot = *(float *)(s + S_ROT);
+        out[i].offset = *(float *)(s + S_OFFSET);
+    }
+    return n;
 }
 
 /* After a batch of copies or removals: the game's changed call and modified, as its `d` and Del do after each. */

@@ -47,6 +47,19 @@ its own one-statue drag; the drag writes start pose + mouse offset to every memb
 (x, z, rot, then 0x41110, which keeps the +0x28 ground offset). The release makes one "Move" undo step. Writes go
 ahead mid-drag because the game never saw the press, so its mouse-down flag stays clear.
 
+0.46.0, linked pieces (`src/statuelinks.c`): the app's `mx-tools-groups.json` names each piece's lines by their exact
+text, and the list holds no text, so the file's statues lines are looked up in the statues file on disk, only while
+that file agrees with the list in order (each record's x, z, +0x28 offset and rot within 1e-3, mesh and texture names
+the same ignoring `@`, case and slash). That holds right after a load and right after the game's save (the writer
+goes through the list in order). In between, each statue's piece is followed by a mark (mesh pointer +0x00, texture
+id +0x10, x, z, rot, offset, read in one pass each frame): when the length changes, the old marks are lined up
+against the new in order (a gap is a deleted statue, new ones are at the end). Nothing lining up, or every mesh
+pointer new at the same length, means the track was loaded again. When the statues file's time changes and it agrees,
+each piece's statues lines are written back from it, other kinds kept, so the app still knows the piece. Ctrl+click
+and the box take a whole piece; Duplicate makes each copied piece a new piece; Snap puts a piece's middle (the mean of
+its parts' x, z) through `snap_math` with its first part's rot, then turns every part by that turn about the middle
+(local +x along (cos rot, -sin rot)) and moves it with the middle. Tested only with a fake list so far.
+
 ## 5. Where a statue's file names are (1684, read 2026-11-12 from the statues writer; not used by the mod yet)
 The writer (`lea` of `"[%f %f %f] %f %s %s %s"` at **0x4a4db**, loop 0x4a4f0..0x4a59f, `fprintf`-like 0x8d350) builds
 each line from the record:

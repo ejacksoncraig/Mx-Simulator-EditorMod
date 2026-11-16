@@ -304,6 +304,27 @@ const char *game_statue_texture(int i);     /* statue i's texture name, NULL if 
 int game_statue_files(int i, char *mesh, char *shape, size_t cap); /* its mesh and shape names ("" for none) */
 /* Statue i pointed at other mesh and shape files (NULL shape = none), at the same index, all else kept. */
 const char *game_statue_set_files(int i, const char *mesh, const char *shape);
+/* Where Snap to Gradient would put a statue at (x, z) turned rot, on the selected gradient. NULL on success, else why. */
+const char *game_snap_point(float x, float z, float rot, float *nx, float *nz, float *nrot);
+/* What tells one statue from another while nothing edits it: its loaded mesh, texture id, place, turn and height offset. */
+typedef struct {
+    uintptr_t mesh;
+    uint32_t tex;
+    float x, z, rot, offset;
+} statue_mark;
+int game_statue_marks(statue_mark *out, int max); /* the list's length; the first max are filled */
+int mod_track_dir(wchar_t *out, size_t cap);      /* curvetool.c: the open track's folder on disk, 0 if unknown */
+
+/* statuelinks.c: the app's linked pieces (mx-tools-groups.json beside the track), as statue indices in the game's list.
+   The file is read when the statues file on disk is what the game holds (the track as loaded, or just saved), and the
+   statues lines in it are written again then, so pieces moved or copied in the game stay linked in the app. */
+void statuelinks_frame(void);                 /* each frame in Statues mode: follows the list, reads and writes the file */
+int statuelinks_piece(int i);                 /* statue i's piece, -1 for none */
+int statuelinks_members(int piece, int *out, int max); /* the statues in a piece; returns how many */
+const char *statuelinks_name(int piece);
+int statuelinks_count(void);                  /* how many pieces have two or more statues */
+/* Copies of statues just made (from[k] copied to to[k]): each piece among the originals gets a piece of its copies. */
+void statuelinks_copied(const int *from, const int *to, int n);
 
 /* statuescale.c: resized copies of a statue's mesh and shape, in the app's layout (statue/scaled/<mesh>-<pct>pct/). */
 /* The files for statue files (mesh, shape) at `by` times their present size: written if needed, names put in out_*.

@@ -6,6 +6,21 @@ What each version of the MX Simulator Tools editor mod added or changed, newest 
 Versions before 0.36 were rebuilt from the notes in `.claude/skills/mx-editor-mod/ingame-tools.md` and from the text in
 each packaged DLL in `dist\` (0.26.0 onward), since git has only one commit. Nothing was found for 0.22, 0.24 or 0.26.
 
+## 0.46.0 (2026-11-16)
+- Linked pieces from MX Simulator Tools work in Statues mode (13). The app's links (`mx-tools-groups.json` beside the
+  track) are read when the track loads.
+  - Ctrl+click a part of a linked piece: the whole piece joins the statue group, or leaves it. A Ctrl+drag box that
+    takes one part takes the rest.
+  - Duplicate Group (`d` or the button): each copied piece is linked as its own piece.
+  - Snap Group to Gradient (`g` or the button): each linked piece moves as one. Its middle goes where the game's snap
+    puts a statue there, and every part turns and moves the same, so the parts stay together. Statues that aren't
+    linked snap one by one, as before.
+  - When the game saves (`s`), the links file is written again with the pieces' new lines, so pieces moved, snapped or
+    copied in the game are still linked in the app. Their billboards, flares and flaggers stay as the app wrote them.
+  - The panel says how many linked pieces the track has.
+- The JSON reader now reads `é`-style characters, which the app writes for any non-ASCII name.
+- Tried with a fake statue list, not in the game yet.
+
 ## 0.45.1 (2026-11-16)
 - `g` in Statues mode (13) with a statue group: Snap Group to Gradient, the same as the button. (`s` stays the game's
   save.) Ctrl+Z undoes it as before.

@@ -78,6 +78,8 @@ static int track_dir(wchar_t *out, size_t cap)
     return got > 0 && got < MAX_PATH && swprintf(out, cap, L"%ls\\MX Simulator\\%ls", local, name) > 0;
 }
 
+int mod_track_dir(wchar_t *out, size_t cap) { return track_dir(out, cap); }
+
 static void status_now(void)
 {
     snprintf(g_status, sizeof g_status, "%d curves%s", g_curves.count, g_dirty ? ", not saved" : "");

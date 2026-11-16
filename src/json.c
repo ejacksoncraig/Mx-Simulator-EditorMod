@@ -51,9 +51,22 @@ int json_string(json_reader *r, char *out, size_t cap)
         char c = *r->p++;
         if (c == '\\' && r->p < r->end) {
             char e = *r->p++;
-            c = e == 'n' ? '\n' : e == 't' ? '\t' : (e == '"' || e == '\\' || e == '/') ? e : '?';
-            if (e == 'u')
-                r->p += (r->end - r->p) >= 4 ? 4 : (r->end - r->p);
+            c = e == 'n' ? '\n' : e == 't' ? '\t' : e == 'r' ? '\r' : (e == '"' || e == '\\' || e == '/') ? e : '?';
+            if (e == 'u') {
+                /* é and the like: the app writes every non-ASCII character this way (Python's json.dumps), and
+                   the track's files are Latin-1, so a code point under 256 is that byte. Anything else stays '?'. */
+                unsigned code = 0;
+                int digits = 0;
+                for (; digits < 4 && r->p < r->end; digits++, r->p++) {
+                    char h = *r->p;
+                    int v = h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h >= 'A' && h <= 'F' ? h - 'A' + 10 : -1;
+                    if (v < 0)
+                        break;
+                    code = code * 16 + (unsigned)v;
+                }
+                if (digits == 4 && code < 256)
+                    c = (char)code;
+            }
         }
         if (n + 1 < cap)
             out[n++] = c;

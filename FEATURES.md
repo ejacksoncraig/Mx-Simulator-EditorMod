@@ -43,6 +43,8 @@ right. Items marked * are new and haven't been tried in the game yet.
 - Drag one statue in the group to move them all.
 - Snap Group to Gradient (button, or `g`). *
 - Duplicate Group: `d` puts the copies at the mouse, and the button puts them 10 ft to the side. *
+- Linked pieces from MX Simulator Tools: Ctrl+click one part to take the whole piece. Duplicate keeps each copy linked,
+  Snap moves each piece as one, and saving keeps the links in the app. *
 - Statue Size: scale the group or one statue by a percentage, or set it back to Real Size. It writes the same files
   as MX Simulator Tools. *
 - Clicking a statue shows its texture's name. *

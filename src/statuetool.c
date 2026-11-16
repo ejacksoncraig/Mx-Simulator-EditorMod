@@ -8,6 +8,9 @@
      or centred on the mouse; the group becomes the copies. Undo takes them back off the end of the list.
    - Snap Group to Gradient runs the game's own snap math (game_statue_snap, a copy of 1684 0xe4291) on each statue in
      the group against the selected gradient. Undo (the panel button or Ctrl+Z) puts a move or snap back, newest first.
+   - A statue in one of the app's linked pieces (mx-tools-groups.json, statuelinks.c) brings its whole piece: Ctrl+click
+     adds or drops all of it, a Ctrl+drag box that takes one part takes the rest, Duplicate keeps each copy linked, and
+     Snap moves each piece as one rigid thing (its middle onto the gradient, every part turned and moved the same).
    Other presses without Ctrl, and every other key, stay the game's. The group is indices into the game's list, so
    it's cleared whenever the list's length changes (the game's d, Del or a reload). Game thread only. */
 #include "curvetool.h"
@@ -206,6 +209,22 @@ int statuetool_down(double x, double z, int ctrl)
         g_box.on = 1, g_box.x0 = g_box.x1 = x, g_box.z0 = g_box.z1 = z;
         return 1;
     }
+    static int members[MAX_GROUP];
+    int piece = statuelinks_piece(hit);
+    int parts = piece >= 0 ? statuelinks_members(piece, members, MAX_GROUP) : 0;
+    if (parts > 1) {
+        int leaving = in_group(hit) >= 0;
+        for (int k = 0; k < parts; k++) {
+            if (leaving)
+                group_remove(members[k]);
+            else
+                group_add(members[k]);
+        }
+        g_list_n = game_statue_count();
+        say("%s (%d linked statues) %s the group: %d in it.", statuelinks_name(piece), parts, leaving ? "out of" : "in",
+            g_group_n);
+        return 1;
+    }
     if (in_group(hit) >= 0) {
         group_remove(hit);
         say("Statue %d out of the group: %d in it.", hit + 1, g_group_n);
@@ -289,6 +308,14 @@ void statuetool_up(void)
         if (game_statue_pose(i, &p) && p.x >= x0 && p.x <= x1 && p.z >= z0 && p.z <= z1 && in_group(i) < 0)
             group_add(i), added++;
     }
+    /* A linked piece comes whole, even with only some of its parts in the box. */
+    static int members[MAX_GROUP];
+    for (int k = before; k < g_group_n; k++) {
+        int parts = statuelinks_members(statuelinks_piece(g_group[k]), members, MAX_GROUP);
+        for (int q = 0; q < parts; q++)
+            if (in_group(members[q]) < 0)
+                group_add(members[q]), added++;
+    }
     g_list_n = n;
     if (g_group_n == before && !added)
         say("No statues in that box. Ctrl+drag around their centres.");
@@ -297,6 +324,52 @@ void statuetool_up(void)
 }
 
 /* ── the edits ── */
+
+#define PI_D 3.14159265358979323846
+
+/* A turn into (-pi, pi], minus 4 pi again for a statue that stays upright (rot <= -2 pi), as the game's snap leaves it. */
+static float wrap_turn(double angle, float old_rot)
+{
+    double a = remainder(angle, 2 * PI_D);
+    if (old_rot <= -2 * PI_D)
+        a -= 4 * PI_D;
+    return (float)a;
+}
+
+/* One linked piece snapped as a rigid thing: its middle goes where the game's Snap to Gradient would put a statue standing
+   there, turned as its first part is; every part then turns by that same amount about the middle and moves with it. A
+   part whose rot means "don't turn" (3.25 or more) keeps its rot but still swings round with the rest. */
+static const char *snap_piece(const int *idx, int n, undo_step *u)
+{
+    static statue_pose was[MAX_GROUP];
+    double cx = 0, cz = 0;
+    for (int k = 0; k < n; k++) {
+        if (!game_statue_pose(idx[k], &was[k]))
+            return "A statue in the group isn't there any more.";
+        cx += was[k].x, cz += was[k].z;
+    }
+    cx /= n, cz /= n;
+    float nx, nz, nrot, r0 = was[0].rot;
+    const char *why = game_snap_point((float)cx, (float)cz, r0, &nx, &nz, &nrot);
+    if (why)
+        return why;
+    double turn = r0 < 3.25f ? remainder((double)nrot - r0, 2 * PI_D) : 0, c = cos(turn), s = sin(turn);
+    for (int k = 0; k < n; k++) {
+        /* Turned the way a statue's rot turns it: local +x points along (cos rot, -sin rot). */
+        double ox = was[k].x - cx, oz = was[k].z - cz;
+        statue_pose p = was[k];
+        p.x = (float)(nx + ox * c + oz * s);
+        p.z = (float)(nz - ox * s + oz * c);
+        if (was[k].rot < 3.25f && turn != 0)
+            p.rot = wrap_turn((double)was[k].rot + turn, was[k].rot);
+        if ((why = game_statue_set_pose(idx[k], &p)) != NULL)
+            return why;
+        u->index[u->n] = idx[k], u->before[u->n] = was[k];
+        game_statue_pose(idx[k], &u->after[u->n]);
+        u->n++;
+    }
+    return NULL;
+}
 
 static void snap_group(void)
 {
@@ -316,10 +389,31 @@ static void snap_group(void)
         say("Out of memory.");
         return;
     }
-    int failed = 0;
+    static char done[MAX_GROUP];
+    static int piece_idx[MAX_GROUP];
+    memset(done, 0, sizeof done);
+    int failed = 0, pieces = 0;
     const char *first_why = NULL;
     for (int k = 0; k < g_group_n; k++) {
-        int i = g_group[k];
+        if (done[k])
+            continue;
+        int i = g_group[k], piece = statuelinks_piece(i), n = 0;
+        /* The group's statues in the same linked piece go together; any other statue snaps alone, as the game does. */
+        for (int q = k; q < g_group_n; q++)
+            if (!done[q] && (q == k || (piece >= 0 && statuelinks_piece(g_group[q]) == piece)))
+                piece_idx[n++] = g_group[q], done[q] = 1;
+        if (n > 1) {
+            int before = u.n;
+            const char *err = snap_piece(piece_idx, n, &u);
+            if (err) {
+                if (!first_why)
+                    first_why = err;
+                failed += n - (u.n - before);
+            } else {
+                pieces++;
+            }
+            continue;
+        }
         statue_pose was;
         if (!game_statue_pose(i, &was)) {
             failed++;
@@ -342,11 +436,14 @@ static void snap_group(void)
         return;
     }
     undo_push(&u);
+    char as_pieces[64] = "";
+    if (pieces)
+        snprintf(as_pieces, sizeof as_pieces, ", %d linked piece%s kept whole", pieces, pieces == 1 ? "" : "s");
     if (failed)
-        say("Snapped %d statues to the gradient; %d couldn't be (%s). Ctrl+Z undoes it.", u.n, failed,
+        say("Snapped %d statues to the gradient%s; %d couldn't be (%s). Ctrl+Z undoes it.", u.n, as_pieces, failed,
             first_why ? first_why : "not there any more");
     else
-        say("Snapped %d statue%s to the gradient. Ctrl+Z undoes it.", u.n, u.n == 1 ? "" : "s");
+        say("Snapped %d statue%s to the gradient%s. Ctrl+Z undoes it.", u.n, u.n == 1 ? "" : "s", as_pieces);
 }
 
 /* Duplicate Group: a copy of every group statue (same object, turn and height above the ground), moved by (dx, dz), added
@@ -398,6 +495,7 @@ static void duplicate_group(double dx, double dz)
         return;
     }
     int asked = g_group_n;
+    statuelinks_copied(g_group, u.index, u.n); /* g_group[k] was copied to u.index[k] */
     memcpy(g_group, u.index, sizeof(int) * u.n);
     g_group_n = u.n;
     undo_push(&u);
@@ -658,6 +756,7 @@ void statuetool_frame(void)
         g_box.on = g_move.on = g_move.wrote = 0;
         return;
     }
+    statuelinks_frame();
     int n = game_statue_count();
     if (g_list_n >= 0 && n != g_list_n) {
         /* A statue was added or deleted: the indices no longer mean the same statues. */
@@ -699,6 +798,9 @@ int statuetool_rows(panel_row *rows, int max, int *kinds, int *args)
     }
     if (ROW(ST_LABEL, ROWK_LABEL, ""))
         snprintf(r->text, sizeof r->text, g_group_n == 1 ? "1 statue in the group" : "%d statues in the group", g_group_n);
+    int linked = statuelinks_count();
+    if (linked && ROW(ST_HINT, ROWK_HINT, ""))
+        snprintf(r->text, sizeof r->text, linked == 1 ? "1 linked piece on this track" : "%d linked pieces on this track", linked);
     if (g_group_n) {
         ROW(ST_SNAP, ROWK_BUTTON, "Snap Group to Gradient");
         if (game_statue_copies_known())
@@ -715,7 +817,7 @@ int statuetool_rows(panel_row *rows, int max, int *kinds, int *args)
         ROW(ST_UNDO, ROWK_BUTTON, label);
     }
     if (ROW(ST_HINT, ROWK_HINT, ""))
-        snprintf(r->text, sizeof r->text, "Ctrl+click: add or drop a statue");
+        snprintf(r->text, sizeof r->text, linked ? "Ctrl+click: add or drop a statue (or piece)" : "Ctrl+click: add or drop a statue");
     if (ROW(ST_HINT, ROWK_HINT, ""))
         snprintf(r->text, sizeof r->text, "Ctrl+drag: box around statues");
     if (g_group_n && ROW(ST_HINT, ROWK_HINT, ""))
