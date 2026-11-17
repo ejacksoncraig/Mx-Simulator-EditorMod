@@ -4,8 +4,8 @@
      v, the image's rows, runs along (sin rot, cos rot) and covers height = size ft.
    (The app has size as the width and f5 = height / width; only that meaning is swapped, its u direction is right.)
 
-   - A click inside a decal picks the smallest one there and makes it the game's selection. Clicks on the selection's
-     own centre dot or rotate dot, and on empty ground, still go to the game (move, its rotate, stamping).
+   - Picking is the game's own: a click on a decal's centre dot or rotate dot (0.47.0: a click inside its box no longer
+     picks it, as in the base editor). Clicks off our handles all go to the game (pick, move, its rotate, stamping).
    - On the selection: a corner scales it about its centre, a side's handle stretches that side with the opposite one
      staying put (Alt: both sides, about the centre; Shift: whole feet), the round handle turns it (Shift: 15 degrees).
      Each mouse move replaces the decal with the game's own call, which re-bakes only its tiles, as the game's drags do.
@@ -187,6 +187,10 @@ static void push_undo(int op, int index, const game_decal *before, const game_de
         e->after = *after;
 }
 
+/* The selection we last saw, so a new pick by the game shows its name (and our own changes to it don't). */
+static int g_seen = -1;
+static void seen_now(void) { g_seen = game_decal_selected(); }
+
 static int find_decal(const game_decal *want, int hint)
 {
     int n;
@@ -237,6 +241,7 @@ static void undo(void)
         return;
     }
     g_undo_count--;
+    seen_now();
     static const char *const WHAT[] = {"Change undone", "Copy removed", "Deleted decal put back"};
     say("%s.%s", WHAT[e->op], undo_available() ? " Ctrl+Z again for the one before." : "");
 }
@@ -252,20 +257,6 @@ static const game_decal *selected(int *index)
     const game_decal *list = game_decal_list(&n);
     *index = i;
     return list && i >= 0 && i < n ? &list[i] : NULL;
-}
-
-/* The smallest decal whose turned rectangle holds the point (the top-most of equal ones), or -1. */
-static int smallest_at(double x, double z)
-{
-    int n, best = -1;
-    double best_area = 0;
-    const game_decal *list = game_decal_list(&n);
-    for (int i = 0; list && i < n; i++) {
-        double area = (double)list[i].size * list[i].size * list[i].f5;
-        if (contains(&list[i], x, z) && (best < 0 || area <= best_area))
-            best = i, best_area = area;
-    }
-    return best;
 }
 
 /* ── handles ── */
@@ -306,18 +297,24 @@ static int handle_at(const game_decal *d, double x, double z, double ft_per_px, 
     return DRAG_NONE;
 }
 
-/* The game's own dots on the selection (0xea690): the centre (move) and centre - 4u (sin, cos) (rotate), pick radius
-   u / 2 with u = max(viewFt / 100, 1). Presses on them stay the game's. */
-static int on_game_dot(const game_decal *d, double x, double z, double ft_per_px)
+/* The decal a plain click would pick, by the game's rule (0xea690, game/decals.md): the first (lowest index) whose
+   centre is within r = u / 2, u = max(viewFt / 100, 1); otherwise the first whose rotate dot, centre - 4u (sin, cos),
+   is. -1 for none (the game stamps). Only used to show what a click would pick; the pick itself is the game's. */
+static int dot_at(double x, double z)
 {
-    int h = 0;
+    int n, h = 0;
     double view_ft = 0;
-    if (!ingame_view(&view_ft, &h))
-        return 0;
-    (void)ft_per_px;
+    const game_decal *list = game_decal_list(&n);
+    if (!list || !ingame_view(&view_ft, &h))
+        return -1;
     double u = view_ft * 0.01 > 1 ? view_ft * 0.01 : 1, r = u / 2;
-    double rx = d->x - 4 * u * d->sin_rot, rz = d->z - 4 * u * d->cos_rot;
-    return hypot(x - d->x, z - d->z) <= r || hypot(x - rx, z - rz) <= r;
+    for (int i = 0; i < n; i++)
+        if (hypot(x - list[i].x, z - list[i].z) <= r)
+            return i;
+    for (int i = 0; i < n; i++)
+        if (hypot(x - (list[i].x - 4 * u * list[i].sin_rot), z - (list[i].z - 4 * u * list[i].cos_rot)) <= r)
+            return i;
+    return -1;
 }
 
 /* ── mouse ── */
@@ -343,20 +340,18 @@ int decaltool_down(double x, double z, double ft_per_px, int shift, int alt)
         g_drag.x0 = x, g_drag.z0 = z, g_drag.angle0 = angle_to(d, x, z);
         return 1;
     }
-    if (d && on_game_dot(d, x, z, ft_per_px))
-        return 0;
-    int pick = smallest_at(x, z);
-    if (pick < 0)
-        return 0; /* empty ground: the game's (stamping) */
-    game_decal_select(pick);
+    return 0; /* the game's: its dots pick, empty ground stamps */
+}
+
+static void say_picked(int i)
+{
     int n;
     const game_decal *list = game_decal_list(&n);
-    if (list && pick < n) {
-        const char *name = game_texture_name(list[pick].tex);
-        say("Decal %d of %d: %s, %.2f x %.2f ft.", pick + 1, n, name ? name : "(name unknown)",
-            list[pick].size * list[pick].f5, list[pick].size);
-    }
-    return 1;
+    if (!list || i < 0 || i >= n)
+        return;
+    const char *name = game_texture_name(list[i].tex);
+    say("Decal %d of %d: %s, %.2f x %.2f ft.", i + 1, n, name ? name : "(name unknown)", list[i].size * list[i].f5,
+        list[i].size);
 }
 
 void decaltool_move(double x, double z, int shift, int alt)
@@ -414,7 +409,7 @@ static void replace_selected(void (*edit)(game_decal *, double), double arg, con
     int index;
     const game_decal *d = selected(&index);
     if (!d) {
-        say("Click a decal to pick it first.");
+        say("Click a decal's centre dot to pick it first.");
         return;
     }
     game_decal before = *d, after = *d;
@@ -436,7 +431,7 @@ static void delete_selected(void)
     int index;
     const game_decal *d = selected(&index);
     if (!d) {
-        say("Click a decal to pick it first.");
+        say("Click a decal's centre dot to pick it first.");
         return;
     }
     game_decal before = *d;
@@ -446,6 +441,7 @@ static void delete_selected(void)
         return;
     }
     push_undo(OP_DELETE, index, &before, NULL);
+    seen_now();
     say("Deleted decal %d. Ctrl+Z puts it back.", index + 1);
 }
 
@@ -485,6 +481,10 @@ void decaltool_frame(void)
     /* The game's rotate drag writes the previous move's sin and cos, so the ground lags one move behind; put them right
        for the selection (only when they're off). */
     int index;
+    if (game_decal_selected() != g_seen) {
+        seen_now();
+        say_picked(g_seen);
+    }
     if (selected(&index) && game_decal_fix_trig(index))
         mx_log("decals: decal %d's sin and cos put right for its rot", index);
 }
@@ -522,7 +522,7 @@ int decaltool_rows(panel_row *rows, int max, int *kinds, int *args)
     } else {
         ROW(DT_HEADER, ROWK_HEADER, "DECALS");
         if (ROW(DT_HINT, ROWK_HINT, ""))
-            snprintf(r->text, sizeof r->text, "Click a decal to pick it");
+            snprintf(r->text, sizeof r->text, "Click a decal's dot to pick it");
     }
     if (undo_available()) {
         static char label[48];
@@ -606,8 +606,8 @@ void decaltool_scene(scene *out, double mouse_x, double mouse_z, double ft_per_p
     int index, n;
     const game_decal *list = game_decal_list(&n);
     const game_decal *d = selected(&index);
-    /* What a click would pick, faint, unless the mouse is on the selection's handles. */
-    int which, hovered = g_drag.kind == DRAG_NONE ? smallest_at(mouse_x, mouse_z) : -1;
+    /* What a click would pick (the mouse on a decal's dot), faint, unless the mouse is on the selection's handles. */
+    int which, hovered = g_drag.kind == DRAG_NONE ? dot_at(mouse_x, mouse_z) : -1;
     if (hovered >= 0 && hovered != index && !(d && handle_at(d, mouse_x, mouse_z, ft_per_px, &which) != DRAG_NONE))
         outline(out, &list[hovered], hover);
     if (!d)

@@ -581,10 +581,10 @@ mouse, keys, frame and scene to it, row kinds from `STAMPTOOL_ROW` = 200, checke
 rows from `DECALTOOL_ROW` = 300 (checked before the stamp's 200). Everything about the game's side is in
 `game/decals.md`; the axes are its section 1 (width = size * f5 along (cos, -sin), height = size along (sin, cos)).
 
-- **Picking:** a press inside a decal (not on a game widget, not on the selection's own centre or rotate dot) picks the
-  smallest one whose turned rectangle holds the mouse and writes it to the game's selection; it never reaches the game,
-  which would stamp a decal there. Presses on empty ground and on the game's dots still go to the game (stamping, its
-  move with the group, its rotate). The decal a click would pick is outlined faintly.
+- **Picking** is the game's own (0.47.0): its centre dot or rotate dot. Until 0.46 the mod picked the smallest decal
+  whose box held the mouse, but that took every click inside a big decal, so it was dropped at Jackson's request. Every
+  press off the selection's handles goes to the game (its pick, its move with the group, its rotate, stamping). The
+  decal a click would pick (the game's dot rule, `dot_at`) is outlined faintly, and a new selection shows its name.
 - **Handles on the selection** (gold outline, screen-px sized): corners scale about the centre (f5 kept; Shift: whole
   feet of height); side handles stretch with the opposite side fixed (Alt: about the centre; Shift: whole feet), hidden
   when that side is under 40 px; the ring past the top edge turns it (relative to where it was grabbed; Shift: 15

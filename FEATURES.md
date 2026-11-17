@@ -1,4 +1,4 @@
-# Jcraig's Editor Mod: features (0.45.1)
+# Jcraig's Editor Mod: features (0.47.0)
 
 Tools added to MX Simulator's track editor (`mx.exe --editor`). Offline only. The tools are in the panel at the top
 right. Items marked * are new and haven't been tried in the game yet.
@@ -51,7 +51,7 @@ right. Items marked * are new and haven't been tried in the game yet.
 - Ctrl+Z undoes moves, snaps, copies and resizes.
 
 ## Decals (build 1684)
-- Click a decal to pick it. Drag the corners to scale it, the sides to stretch it, and the handle to rotate it.
+- Pick a decal the game's way, by its centre dot or rotate dot. Drag the corners to scale it, the sides to stretch it, and the handle to rotate it.
   Shift and Alt change the steps.
 - `[` `]` scale by 10%, and `{` `}` by 1%.
 - Delete Decal, and undo (Ctrl+Z, 64 steps).

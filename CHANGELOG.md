@@ -6,6 +6,12 @@ What each version of the MX Simulator Tools editor mod added or changed, newest 
 Versions before 0.36 were rebuilt from the notes in `.claude/skills/mx-editor-mod/ingame-tools.md` and from the text in
 each packaged DLL in `dist\` (0.26.0 onward), since git has only one commit. Nothing was found for 0.22, 0.24 or 0.26.
 
+## 0.47.0 (2026-11-16)
+- Decals mode (15): a click inside a decal's box no longer picks it. Picking is the game's own again, as in the base
+  editor: click a decal's centre dot or rotate dot. A click anywhere else off the selection's handles goes to the game
+  (it stamps there). The faint outline now shows only when the mouse is on a decal's dot, and the decal's name still
+  shows when it's picked.
+
 ## 0.46.0 (2026-11-16)
 - Linked pieces from MX Simulator Tools work in Statues mode (13). The app's links (`mx-tools-groups.json` beside the
   track) are read when the track loads.

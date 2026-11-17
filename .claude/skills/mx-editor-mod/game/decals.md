@@ -115,6 +115,7 @@ new decals just above their own texture group, not on top of everything, which i
 ## 6. Notes for the decal tools (the brief)
 - Pick the smallest-area decal whose turned rectangle holds the mouse, then write its index to `0x50fd2a4`, so the
   game draws it as selected and its copies, stamps and Level work from it. (Not its Del, `x` or `m`: see 5b.)
+  Dropped in mod 0.47.0: it took every click inside a big decal. The game's own dot pick is used instead.
 - Corner and side drags: build the new record (size and f5 with the axes of section 1, sin and cos from rot), then
   `0xcf70` on each move.
 - D, a flush copy on its right: right = +u = (cos rot, -sin rot), centre moves by size * f5. Insert at i + 1 with the

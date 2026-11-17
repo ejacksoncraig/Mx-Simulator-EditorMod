@@ -268,7 +268,7 @@ const char *game_decal_insert(int i, const game_decal *d);     /* fixes the sele
 const char *game_decal_delete(int i);                          /* fixes the selection and group as the game does */
 int game_decal_fix_trig(int i);                       /* rewrites sin and cos from rot if they don't match: 1 if it did */
 
-/* decaltool.c: editing the game's decals in Decals mode (15): pick by area, scale, stretch, turn, delete, our undo.
+/* decaltool.c: editing the game's decals in Decals mode (15): scale, stretch, turn, delete, our undo.
    Its rows go in our panel in mode 15; their kinds start at DECALTOOL_ROW. Game thread only. */
 #define DECALTOOL_ROW 300
 int decaltool_active(void);                 /* mode 15, our tool off, this build's decal calls known */
