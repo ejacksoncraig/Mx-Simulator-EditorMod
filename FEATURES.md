@@ -51,7 +51,7 @@ right. Items marked * are new and haven't been tried in the game yet.
 - Ctrl+Z undoes moves, snaps, copies and resizes.
 
 ## Decals (build 1684)
-- Pick a decal the game's way, by its centre dot or rotate dot. Drag the corners to scale it, the sides to stretch it, and the handle to rotate it.
+- Pick a decal the game's way, by its centre dot or rotate dot. Drag the corners to scale it, a side (its handle or anywhere along that edge) to stretch it, and the handle to rotate it.
   Shift and Alt change the steps.
 - `[` `]` scale by 10%, and `{` `}` by 1%.
 - Delete Decal, and undo (Ctrl+Z, 64 steps).

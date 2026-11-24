@@ -587,7 +587,8 @@ rows from `DECALTOOL_ROW` = 300 (checked before the stamp's 200). Everything abo
   decal a click would pick (the game's dot rule, `dot_at`) is outlined faintly, and a new selection shows its name.
 - **Handles on the selection** (gold outline, screen-px sized): corners scale about the centre (f5 kept; Shift: whole
   feet of height); side handles stretch with the opposite side fixed (Alt: about the centre; Shift: whole feet), hidden
-  when that side is under 40 px; the ring past the top edge turns it (relative to where it was grabbed; Shift: 15
+  when that side is under 40 px. Since 0.48.0 a press anywhere along an edge (within 7 px of it) stretches that side too,
+  drawn thick while hovered, unless a decal's dot is under the mouse (the dot stays the game's); the ring past the top edge turns it (relative to where it was grabbed; Shift: 15
   degree steps). Each mouse move calls 0xcf70 with a record built from the decal as it was at the press, with sin and
   cos computed from the new rot. One undo step per drag.
 - **Keys** (only while a decal is picked; mode 15; our tool off): `d` is the game's own copy (0.35.0 had a flush copy

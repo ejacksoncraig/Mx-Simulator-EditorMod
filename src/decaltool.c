@@ -6,7 +6,7 @@
 
    - Picking is the game's own: a click on a decal's centre dot or rotate dot (0.47.0: a click inside its box no longer
      picks it, as in the base editor). Clicks off our handles all go to the game (pick, move, its rotate, stamping).
-   - On the selection: a corner scales it about its centre, a side's handle stretches that side with the opposite one
+   - On the selection: a corner scales it about its centre, a side's handle, or anywhere along that edge (0.48.0), stretches that side with the opposite one
      staying put (Alt: both sides, about the centre; Shift: whole feet), the round handle turns it (Shift: 15 degrees).
      Each mouse move replaces the decal with the game's own call, which re-bakes only its tiles, as the game's drags do.
    - [ and ] scale by 10% ({ and }, i.e. Shift, by 1% while the game's group is empty; with a group they stay the game's
@@ -276,6 +276,8 @@ static int side_shown(const game_decal *d, int side, double ft_per_px)
     return length / ft_per_px >= SIDE_MIN_PX;
 }
 
+static int dot_at(double x, double z);
+
 /* Which handle of d is under (x, z): DRAG_* with which = corner or side, or DRAG_NONE. */
 static int handle_at(const game_decal *d, double x, double z, double ft_per_px, int *which)
 {
@@ -292,6 +294,17 @@ static int handle_at(const game_decal *d, double x, double z, double ft_per_px, 
         double sx, sz;
         to_world(d, SIDE[k][0] * hu, SIDE[k][1] * hv, &sx, &sz);
         if (side_shown(d, k, ft_per_px) && hypot(x - sx, z - sz) <= r)
+            return *which = k, DRAG_SIDE;
+    }
+    /* Anywhere else along an edge (0.48.0) stretches that side, unless a decal's dot is there (the game's pick/move). */
+    if (dot_at(x, z) >= 0)
+        return DRAG_NONE;
+    double u, v;
+    to_decal(d, x, z, &u, &v);
+    for (int k = 0; k < 4; k++) {
+        double across = SIDE[k][0] ? u - SIDE[k][0] * hu : v - SIDE[k][1] * hv, along = SIDE[k][0] ? v : u,
+               half = SIDE[k][0] ? hv : hu;
+        if (fabs(across) <= r && fabs(along) <= half)
             return *which = k, DRAG_SIDE;
     }
     return DRAG_NONE;
@@ -615,6 +628,28 @@ void decaltool_scene(scene *out, double mouse_x, double mouse_z, double ft_per_p
     outline(out, d, gold);
     double c[4][2], hu, hv, tx, tz;
     corners(d, c);
+    /* The edge a press would stretch, drawn thick. SIDE order to corner pairs: left 3-0, right 1-2, top 0-1, bottom 2-3. */
+    int side = 0, hot = 0;
+    if (g_drag.kind == DRAG_SIDE)
+        side = g_drag.which, hot = 1;
+    else if (g_drag.kind == DRAG_NONE)
+        hot = handle_at(d, mouse_x, mouse_z, ft_per_px, &side) == DRAG_SIDE;
+    if (hot) {
+        static const int ends[4][2] = {{3, 0}, {1, 2}, {0, 1}, {2, 3}};
+        const double *a = c[ends[side][0]], *b = c[ends[side][1]];
+        double len = hypot(b[0] - a[0], b[1] - a[1]), t = 2.5 * ft_per_px; /* 5 px thick */
+        if (len > 0) {
+            double nx = -(b[1] - a[1]) / len * t, nz = (b[0] - a[0]) / len * t;
+            const double q[4][2] = {{a[0] + nx, a[1] + nz}, {b[0] + nx, b[1] + nz}, {b[0] - nx, b[1] - nz}, {a[0] - nx, a[1] - nz}};
+            for (int pass = 0; pass < 2; pass++) { /* both windings: which one faces depends on the side */
+                scene_item *quad = add(out, SCENE_QUAD, gold, 4);
+                for (int k = 0; quad && k < 4; k++) {
+                    int j = pass ? 3 - k : k;
+                    out->pt[quad->first + k][0] = (float)q[j][0], out->pt[quad->first + k][1] = (float)q[j][1];
+                }
+            }
+        }
+    }
     for (int k = 0; k < 4; k++) {
         dot_px(out, c[k][0], c[k][1], 2 * HANDLE_PX + 2, ft_per_px, u, edge);
         dot_px(out, c[k][0], c[k][1], 2 * HANDLE_PX - 2, ft_per_px, u, handle);

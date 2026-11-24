@@ -6,6 +6,10 @@ What each version of the MX Simulator Tools editor mod added or changed, newest 
 Versions before 0.36 were rebuilt from the notes in `.claude/skills/mx-editor-mod/ingame-tools.md` and from the text in
 each packaged DLL in `dist\` (0.26.0 onward), since git has only one commit. Nothing was found for 0.22, 0.24 or 0.26.
 
+## 0.48.0 (2026-11-24)
+- Decals mode (15): with a decal picked, a press anywhere along an edge of its gold box stretches that side, not only
+  on the side's handle. The edge under the mouse is drawn thick. A decal's dot on the edge still goes to the game.
+
 ## 0.47.0 (2026-11-16)
 - Decals mode (15): a click inside a decal's box no longer picks it. Picking is the game's own again, as in the base
   editor: click a decal's centre dot or rotate dot. A click anywhere else off the selection's handles goes to the game
